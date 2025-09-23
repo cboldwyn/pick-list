@@ -64,7 +64,7 @@ def process_data(so_df, assembly_df, product_df=None):
         # Extract relevant columns from Sales Orders using actual column names
         so_columns = {
             'Customer': so_df['Customer'],
-            'Order_Number': so_df['Order Number'],
+            'Order_Number': so_df['Order Number'],  # Keep internal name as Order_Number for consistency
             'Category': so_df['Category'],
             'Product': so_df['Product'],
             'Product_ID': so_df['Product Id'],  # Corrected column name
@@ -136,13 +136,13 @@ def process_data(so_df, assembly_df, product_df=None):
         # Remove the Lookup_Value and Product_ID columns as they're not needed in the final output
         result_df = result_df.drop(['Lookup_Value', 'Product_ID'], axis=1)
         
-        # Reorder columns with Cases as second to last (after Quantity, before Picked)
+        # Reorder columns with Cases as second to last (after Quantity, before Picked will be added in PDF)
         columns_order = ['Customer', 'Order_Number', 'Category', 'Product', 'Batch_Number', 'Input_Package_Number', 'Quantity', 'Cases']
         result_df = result_df[columns_order]
         
         # Filter out null customers and sort (replicating your QUERY)
         result_df = result_df[result_df['Customer'].notna() & (result_df['Customer'] != "")]
-        result_df = result_df.sort_values(['Customer', 'Order_Number', 'Category', 'Product'])
+        result_df = result_df.sort_values(['Customer', 'Order_Number', 'Category', 'Product'])  # Order_Number internally, displays as Sales Order
         
         # Reset index
         result_df = result_df.reset_index(drop=True)
@@ -159,17 +159,24 @@ def process_data(so_df, assembly_df, product_df=None):
         return None
 
 # Function to generate PDF
-def generate_pdf(df, selected_filters=None):
+def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_order=False, portrait_mode=False):
     """
-    Generate a styled PDF report with landscape orientation and custom color scheme
+    Generate a styled PDF report with landscape or portrait orientation and custom color scheme
     """
     buffer = io.BytesIO()
     
-    # Use landscape orientation with smaller margins for larger table
-    from reportlab.lib.pagesizes import landscape, A4
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), 
-                          topMargin=0.5*inch, bottomMargin=0.5*inch,  # Balanced margins
-                          leftMargin=0.3*inch, rightMargin=0.3*inch)
+    # Choose orientation based on user preference
+    from reportlab.lib.pagesizes import A4, landscape
+    if portrait_mode:
+        page_size = A4
+        doc = SimpleDocTemplate(buffer, pagesize=A4, 
+                              topMargin=0.5*inch, bottomMargin=0.5*inch,
+                              leftMargin=0.3*inch, rightMargin=0.3*inch)
+    else:
+        page_size = landscape(A4)
+        doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), 
+                              topMargin=0.5*inch, bottomMargin=0.5*inch,
+                              leftMargin=0.3*inch, rightMargin=0.3*inch)
     
     # Get styles
     styles = getSampleStyleSheet()
@@ -200,18 +207,67 @@ def generate_pdf(df, selected_filters=None):
             filter_para = Paragraph(filter_text, filter_style)
             elements.append(filter_para)
     
-    # Function to wrap text for display
-    def wrap_text(text, max_length=20, break_chars=['-', ' ']):
-        """Simple text wrapping function"""
+    # Extract unique customers and sales orders for footer (regardless of column visibility)
+    unique_customers = sorted(df['Customer'].unique())
+    unique_sales_orders = sorted(df['Order_Number'].unique())
+    
+    # Function to wrap text for display with smart width detection
+    def wrap_text_smart(text, column_width_inches, font_size=8):
+        """Smart text wrapping based on actual column width"""
+        if not text or pd.isna(text):
+            return ""
+        
+        text = str(text).strip()
+        if not text:
+            return ""
+        
+        # More accurate character estimation for Helvetica font
+        # Average character width in Helvetica is roughly 0.5-0.6 * font_size
+        points_width = column_width_inches * 72 - 12  # Subtract padding (6 points each side)
+        avg_char_width = 0.55 * font_size  # More conservative estimate
+        max_chars_per_line = int(points_width / avg_char_width)
+        
+        # Don't wrap if text fits comfortably
+        if len(text) <= max_chars_per_line:
+            return text
+        
+        # Find the best break point after a hyphen
+        best_break = None
+        
+        # Look for hyphens within reasonable range, break AFTER the hyphen
+        for i in range(max_chars_per_line, max(max_chars_per_line//3, 5), -1):
+            if i < len(text) and text[i-1] == '-':
+                best_break = i  # This puts hyphen at end of first line
+                break
+        
+        # If no hyphen found, look for spaces
+        if not best_break:
+            for i in range(max_chars_per_line, max(max_chars_per_line//3, 5), -1):
+                if i < len(text) and text[i-1] == ' ':
+                    best_break = i - 1  # Break before the space
+                    break
+        
+        # If still no good break point, don't wrap (let it overflow slightly rather than bad break)
+        if not best_break or best_break < max_chars_per_line//3:
+            return text
+        
+        return text[:best_break] + '\n' + text[best_break:].strip()
+    
+    # Function to wrap text for display (for fixed-width columns)
+    def wrap_text(text, max_length=20, break_chars=None):
+        """Simple text wrapping function for columns with known limits"""
         if not text or len(str(text)) <= max_length:
             return str(text)
         
         text = str(text)
         
-        # Find break points
-        for i in range(min(max_length, len(text)), 0, -1):
-            if text[i-1] in break_chars:
-                return text[:i-1] + '\n' + text[i:]
+        # Find break points, prioritizing hyphens
+        for i in range(max_length, max(max_length//2, 1), -1):
+            if i < len(text):
+                if text[i-1] == '-':
+                    return text[:i] + '\n' + text[i:].strip()
+                elif text[i-1] == ' ':
+                    return text[:i-1] + '\n' + text[i:].strip()
         
         # No good break point found, break at max_length
         return text[:max_length] + '\n' + text[max_length:]
@@ -222,40 +278,95 @@ def generate_pdf(df, selected_filters=None):
             return str(package_text)
         return str(package_text)[-14:]
     
-    # Prepare table data with updated headers and Picked column
-    headers = ['Customer', 'Order Number', 'Category', 'Product', 'Batch', 'Package', 'Qty', 'Cases', 'Picked']
+    # Build headers and column widths based on visibility options and orientation
+    headers = []
+    col_widths = []
+    
+    if not hide_customer:
+        headers.append('Customer')
+        col_widths.append(1.3*inch if not portrait_mode else 1*inch)
+    
+    if not hide_sales_order:
+        headers.append('SO')
+        col_widths.append(1*inch if not portrait_mode else 0.8*inch)
+    
+    # Always include these columns
+    headers.extend(['Category', 'Product', 'Batch', 'Package', 'Qty', 'Cases', 'Picked'])
+    
+    # Adjust column widths based on hidden columns and orientation
+    if portrait_mode:
+        # Portrait mode - tighter spacing
+        if hide_customer and hide_sales_order:
+            col_widths.extend([0.8*inch, 2.5*inch, 0.9*inch, 0.9*inch, 0.5*inch, 0.5*inch, 0.6*inch])
+        elif hide_customer or hide_sales_order:
+            col_widths.extend([0.7*inch, 2.1*inch, 0.8*inch, 0.8*inch, 0.5*inch, 0.5*inch, 0.6*inch])
+        else:
+            col_widths.extend([0.6*inch, 1.8*inch, 0.7*inch, 0.7*inch, 0.4*inch, 0.4*inch, 0.5*inch])
+    else:
+        # Landscape mode - existing widths
+        if hide_customer and hide_sales_order:
+            col_widths.extend([1.1*inch, 3.8*inch, 1.3*inch, 1.3*inch, 0.7*inch, 0.7*inch, 0.9*inch])
+        elif hide_customer or hide_sales_order:
+            col_widths.extend([1*inch, 3.2*inch, 1.2*inch, 1.2*inch, 0.6*inch, 0.6*inch, 0.8*inch])
+        else:
+            col_widths.extend([0.9*inch, 2.5*inch, 1.1*inch, 1.1*inch, 0.6*inch, 0.6*inch, 0.8*inch])
+    
+    # Prepare table data
     table_data = [headers]
     
     for _, row in df.iterrows():
         # Handle None/NaN values for batch number
         batch_number = str(row['Batch_Number']) if pd.notna(row['Batch_Number']) and str(row['Batch_Number']).lower() != 'none' else ""
         
-        # Process text fields with wrapping applied to Category
-        product_name = wrap_text(str(row['Product']), 30)  # Longer product names
-        category_wrapped = wrap_text(str(row['Category']), 12)  # Wrap category column
-        batch_display = wrap_text(batch_number, 15, ['-', ' ']) if batch_number else ""
+        # Determine product column width based on visibility settings and orientation
+        if portrait_mode:
+            if hide_customer and hide_sales_order:
+                product_width = 2.5
+            elif hide_customer or hide_sales_order:
+                product_width = 2.1
+            else:
+                product_width = 1.8
+        else:
+            if hide_customer and hide_sales_order:
+                product_width = 3.8
+            elif hide_customer or hide_sales_order:
+                product_width = 3.2
+            else:
+                product_width = 2.5
+        
+        # Process text fields with smart wrapping for product names
+        product_name = wrap_text_smart(str(row['Product']), product_width, font_size=8)
+        category_wrapped = wrap_text(str(row['Category']), 12)  # Category still uses simple wrap
+        batch_display = wrap_text(batch_number, 15) if batch_number else ""  # Remove third parameter
         package_display = truncate_package_number(row['Input_Package_Number']) if pd.notna(row['Input_Package_Number']) else ""
         
         # Handle Cases with wrapping
         cases_display = wrap_text(str(row['Cases']), 8) if pd.notna(row['Cases']) and str(row['Cases']) != "" else ""
         
-        table_data.append([
-            str(row['Customer']),
-            str(row['Order_Number']),
-            category_wrapped,  # Now wrapped
-            product_name,
+        # Build row data based on visibility options
+        row_data = []
+        
+        if not hide_customer:
+            row_data.append(str(row['Customer']))
+        
+        if not hide_sales_order:
+            row_data.append(str(row['Order_Number']))
+        
+        # Always include these columns
+        row_data.extend([
+            category_wrapped,
+            product_name,  # Now using smart wrapping
             batch_display,
             package_display,
             str(row['Quantity']),
-            cases_display,  # Cases column (calculated)
+            cases_display,
             ""  # Empty Picked column for manual entry
         ])
-    
-    # Create table with expanded column widths for larger table (Cases after Qty)
-    col_widths = [1.3*inch, 1*inch, 0.9*inch, 2.5*inch, 1.1*inch, 1.1*inch, 0.6*inch, 0.6*inch, 0.8*inch]
+        
+        table_data.append(row_data)
     
     # Create table without header repetition
-    table = Table(table_data, colWidths=col_widths)
+    table = Table(table_data, colWidths=col_widths, rowHeights=None)  # Let ReportLab calculate row heights
     
     # Custom color scheme
     primary_color = colors.Color(61/255, 192/255, 204/255)      # #3DC0CC - Primary teal
@@ -263,41 +374,44 @@ def generate_pdf(df, selected_filters=None):
     alt_row_color = colors.Color(248/255, 252/255, 253/255)     # Very light teal
     border_color = colors.Color(0.6, 0.6, 0.6)                 # Neutral gray for borders
     
-    # Create table styles with prominent header (title-like)
+    # Create table styles with prominent header and proper vertical alignment
     table_style = [
         # Header row - more prominent/title-like
         ('BACKGROUND', (0, 0), (-1, 0), primary_color),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),          # Horizontal center
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),         # Vertical center for ALL cells
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 12),  # Larger font size for title effect
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 15),  # More padding for prominence
-        ('TOPPADDING', (0, 0), (-1, 0), 15),     # More padding for prominence
+        ('FONTSIZE', (0, 0), (-1, 0), 12),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 15),
+        ('TOPPADDING', (0, 0), (-1, 0), 15),
         
-        # Data rows
+        # Data rows with increased padding for better vertical centering
         ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
         ('FONTSIZE', (0, 1), (-1, -1), 8),
-        ('GRID', (0, 0), (-1, -1), 0.5, border_color),  # Neutral gray borders
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('GRID', (0, 0), (-1, -1), 0.5, border_color),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, alt_row_color]),
-        ('LEFTPADDING', (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-        ('TOPPADDING', (0, 1), (-1, -1), 6),     # Standard padding for data rows
-        ('BOTTOMPADDING', (0, 1), (-1, -1), 6),  # Standard padding for data rows
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),    # Increased padding
+        ('RIGHTPADDING', (0, 0), (-1, -1), 8),   # Increased padding  
+        ('TOPPADDING', (0, 1), (-1, -1), 12),    # Increased top padding for data rows
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 12), # Increased bottom padding for data rows
+        
+        # Ensure minimum row height for proper centering
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, alt_row_color]),
     ]
     
     table.setStyle(TableStyle(table_style))
     elements.append(table)
     
-    # Simple footer function with just page info
+    # Enhanced footer function with customer/SO info on all pages
     def add_page_footer(canvas, doc):
-        """Add footer with page numbers and generation info"""
+        """Add footer with page numbers, generation info, and customer/SO info on all pages"""
         canvas.saveState()
         
-        page_width = landscape(A4)[0]
+        page_width = page_size[0]  # Use the appropriate page width based on orientation
+        page_num = canvas.getPageNumber()
         
         # Page number and generation time
-        page_num = canvas.getPageNumber()
         page_text = f"Page {page_num}"
         gen_time = datetime.now().strftime('%m/%d/%Y %I:%M %p')
         gen_text = f"Generated: {gen_time}"
@@ -310,9 +424,36 @@ def generate_pdf(df, selected_filters=None):
         # Right side - page number  
         canvas.drawRightString(page_width - 0.3*inch, 0.3*inch, page_text)
         
+        # Center - Customer and SO info (on all pages, no labels)
+        center_info_parts = []
+        
+        # Add customer info (always show if customers exist)
+        if unique_customers:
+            if len(unique_customers) <= 3:
+                customer_text = ", ".join(unique_customers)
+            else:
+                customer_text = f"{', '.join(unique_customers[:2])} + {len(unique_customers)-2} more"
+            center_info_parts.append(customer_text)
+        
+        # Add SO info (always show if sales orders exist)
+        if unique_sales_orders:
+            if len(unique_sales_orders) <= 5:
+                so_text = ", ".join(unique_sales_orders)
+            else:
+                so_text = f"{', '.join(unique_sales_orders[:3])} + {len(unique_sales_orders)-3} more"
+            center_info_parts.append(f"SO: {so_text}")
+        
+        # Display center info if we have any
+        if center_info_parts:
+            center_text = " | ".join(center_info_parts)
+            # Calculate center position
+            text_width = canvas.stringWidth(center_text, 'Helvetica', 8)
+            x_position = (page_width - text_width) / 2
+            canvas.drawString(x_position, 0.3*inch, center_text)
+        
         canvas.restoreState()
     
-    # Build PDF with clean footer
+    # Build PDF with enhanced footer
     doc.build(elements, onFirstPage=add_page_footer, onLaterPages=add_page_footer)
     buffer.seek(0)
     return buffer
@@ -405,7 +546,7 @@ if st.session_state.processed_data is not None:
         st.header("🎯 Create Custom Pick List")
         
         # Filter section
-        col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
+        col1, col2, col3 = st.columns([2, 2, 2])
         
         with col1:
             customers = sorted(processed_df['Customer'].unique().tolist())
@@ -417,7 +558,7 @@ if st.session_state.processed_data is not None:
             else:
                 filtered_orders = processed_df['Order_Number'].unique()
             orders = sorted(filtered_orders.tolist())
-            selected_orders = st.multiselect("Select Order Numbers", orders)
+            selected_orders = st.multiselect("Select Sales Orders", orders)
             
         with col3:
             if selected_customers:
@@ -428,10 +569,20 @@ if st.session_state.processed_data is not None:
                 filtered_categories = processed_df['Category'].unique()
             categories = sorted(filtered_categories.tolist())
             selected_categories = st.multiselect("Select Categories", categories)
-            
+        
+        # PDF Options and Generate Button
+        col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
+        
+        with col1:
+            hide_customer = st.checkbox("Hide Customer Column", help="Remove Customer column from PDF report")
+        
+        with col2:
+            hide_sales_order = st.checkbox("Hide SO Column", help="Remove Sales Order column from PDF report")
+        
+        with col3:
+            portrait_mode = st.checkbox("Portrait Mode", help="Generate PDF in portrait orientation instead of landscape")
+        
         with col4:
-            st.write("")  # Empty space
-            st.write("")  # Empty space
             generate_pdf_btn = st.button("📑 Generate PDF", type="primary")
         
         # Apply filters
@@ -445,7 +596,7 @@ if st.session_state.processed_data is not None:
             
         if selected_orders:
             filtered_df = filtered_df[filtered_df['Order_Number'].isin(selected_orders)]
-            applied_filters['Order Numbers'] = selected_orders
+            applied_filters['Sales Orders'] = selected_orders
             
         if selected_categories:
             filtered_df = filtered_df[filtered_df['Category'].isin(selected_categories)]
@@ -473,7 +624,7 @@ if st.session_state.processed_data is not None:
             # PDF download (triggered by the button above)
             if generate_pdf_btn:
                 with st.spinner("Generating PDF report..."):
-                    pdf_buffer = generate_pdf(filtered_df, applied_filters)
+                    pdf_buffer = generate_pdf(filtered_df, applied_filters, hide_customer, hide_sales_order, portrait_mode)
                     
                 # Immediately trigger download
                 st.download_button(
@@ -495,7 +646,7 @@ if st.session_state.processed_data is not None:
         # Summary metrics
         col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
-            st.metric("🛒 Total Orders", len(processed_df['Order_Number'].unique()))
+            st.metric("🛒 Total Sales Orders", len(processed_df['Order_Number'].unique()))
         with col2:
             st.metric("👥 Unique Customers", len(processed_df['Customer'].unique()))
         with col3:
@@ -585,6 +736,7 @@ else:
             - Status: Processing orders only
             - Date Range: Past 30 days
             - Required columns: Customer, Order Number, Category, Product, Product Id, Package Batch Number, Package Label, Quantity
+            - Note: "Order Number" column will display as "Sales Order" in reports
             
             **Assembly Data CSV:** *(Required)*
             - Date Range: Last 3 days
