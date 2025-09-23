@@ -27,6 +27,8 @@ if 'so_data' not in st.session_state:
     st.session_state.so_data = None
 if 'assembly_data' not in st.session_state:
     st.session_state.assembly_data = None
+if 'product_data' not in st.session_state:
+    st.session_state.product_data = None
 
 # Function to clean and load CSV data
 def load_csv_with_metadata_skip(uploaded_file):
@@ -54,7 +56,7 @@ def load_csv_with_metadata_skip(uploaded_file):
         return None
 
 # Function to process the data (replicating your Google Sheets formula)
-def process_data(so_df, assembly_df):
+def process_data(so_df, assembly_df, product_df=None):
     """
     Replicates the Google Sheets QUERY formula logic based on actual CSV structure
     """
@@ -65,6 +67,7 @@ def process_data(so_df, assembly_df):
             'Order_Number': so_df['Order Number'],
             'Category': so_df['Category'],
             'Product': so_df['Product'],
+            'Product_ID': so_df['Product Id'],  # Corrected column name
             'Batch_Number': so_df['Package Batch Number'],
             'Lookup_Value': so_df['Package Label'],  # This is what we lookup in Assembly
             'Quantity': so_df['Quantity']
@@ -99,11 +102,42 @@ def process_data(so_df, assembly_df):
         
         result_df['Input_Package_Number'] = input_package_numbers
         
-        # Remove the Lookup_Value column as it's not needed in the final output
-        result_df = result_df.drop('Lookup_Value', axis=1)
+        # Product data processing - calculate number of cases (Quantity ÷ Units Per Case)
+        cases = []
+        if product_df is not None:
+            # Create lookup dictionary: Product ID -> Units Per Case
+            product_lookup = dict(zip(product_df['ID'], product_df['Units Per Case']))
+            
+            for idx, row in result_df.iterrows():
+                product_id = row['Product_ID']
+                quantity = row['Quantity']
+                
+                try:
+                    units_per_case = product_lookup.get(product_id, None)
+                    
+                    # Calculate cases if we have valid data
+                    if (pd.notna(units_per_case) and units_per_case != '' and 
+                        pd.notna(quantity) and quantity != '' and 
+                        float(units_per_case) > 0):
+                        
+                        calculated_cases = float(quantity) / float(units_per_case)
+                        # Round to 2 decimal places for display
+                        cases.append(round(calculated_cases, 2))
+                    else:
+                        cases.append("")
+                except:
+                    cases.append("")
+        else:
+            # No product data available
+            cases = [""] * len(result_df)
         
-        # Reorder columns to put Quantity last
-        columns_order = ['Customer', 'Order_Number', 'Category', 'Product', 'Batch_Number', 'Input_Package_Number', 'Quantity']
+        result_df['Cases'] = cases
+        
+        # Remove the Lookup_Value and Product_ID columns as they're not needed in the final output
+        result_df = result_df.drop(['Lookup_Value', 'Product_ID'], axis=1)
+        
+        # Reorder columns with Cases as second to last (after Quantity, before Picked)
+        columns_order = ['Customer', 'Order_Number', 'Category', 'Product', 'Batch_Number', 'Input_Package_Number', 'Quantity', 'Cases']
         result_df = result_df[columns_order]
         
         # Filter out null customers and sort (replicating your QUERY)
@@ -120,49 +154,51 @@ def process_data(so_df, assembly_df):
         st.info("Please check that your CSV files have the expected column structure.")
         st.info(f"Available Sales Order columns: {list(so_df.columns)}")
         st.info(f"Available Assembly columns: {list(assembly_df.columns)}")
+        if product_df is not None:
+            st.info(f"Available Product columns: {list(product_df.columns)}")
         return None
 
 # Function to generate PDF
 def generate_pdf(df, selected_filters=None):
     """
-    Generate a styled PDF report with landscape orientation and professional colors
+    Generate a styled PDF report with landscape orientation and custom color scheme
     """
     buffer = io.BytesIO()
     
-    # Use landscape orientation
+    # Use landscape orientation with smaller margins for larger table
     from reportlab.lib.pagesizes import landscape, A4
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), 
-                          topMargin=0.5*inch, bottomMargin=0.75*inch,
-                          leftMargin=0.5*inch, rightMargin=0.5*inch)
+                          topMargin=0.5*inch, bottomMargin=0.5*inch,  # Balanced margins
+                          leftMargin=0.3*inch, rightMargin=0.3*inch)
     
     # Get styles
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading2'],
-        fontSize=14,
-        textColor=colors.Color(0.2, 0.4, 0.2),  # Dark green
+    filter_style = ParagraphStyle(
+        'FilterStyle',
+        parent=styles['Normal'],
+        fontSize=9,
+        textColor=colors.Color(0.4, 0.4, 0.4),  # Same as other text
         alignment=1,  # Center alignment
         spaceAfter=10
     )
     
     elements = []
     
-    # Compact title
-    title = Paragraph("Sales Order Pick List", title_style)
-    elements.append(title)
-    
-    # Add filter information if any (compact)
+    # Add filter information in header if any
     if selected_filters:
-        filter_parts = []
+        filter_values = []
         for key, value in selected_filters.items():
             if value:
-                filter_parts.append(f"{key}: {', '.join(value) if isinstance(value, list) else value}")
-        if filter_parts:
-            filter_text = " | ".join(filter_parts)
-            filter_para = Paragraph(f"<i>{filter_text}</i>", styles['Normal'])
+                # Just show the values, not the labels
+                if isinstance(value, list):
+                    filter_values.extend(value)
+                else:
+                    filter_values.append(value)
+        
+        if filter_values:
+            filter_text = " | ".join(filter_values)
+            filter_para = Paragraph(filter_text, filter_style)
             elements.append(filter_para)
-            elements.append(Spacer(1, 10))
     
     # Function to wrap text for display
     def wrap_text(text, max_length=20, break_chars=['-', ' ']):
@@ -186,87 +222,97 @@ def generate_pdf(df, selected_filters=None):
             return str(package_text)
         return str(package_text)[-14:]
     
-    # Prepare table data with Picked column
-    headers = ['Customer', 'Order Number', 'Category', 'Product', 'Batch Number', 'Input Package Number', 'Quantity', 'Picked']
+    # Prepare table data with updated headers and Picked column
+    headers = ['Customer', 'Order Number', 'Category', 'Product', 'Batch', 'Package', 'Qty', 'Cases', 'Picked']
     table_data = [headers]
     
     for _, row in df.iterrows():
         # Handle None/NaN values for batch number
         batch_number = str(row['Batch_Number']) if pd.notna(row['Batch_Number']) and str(row['Batch_Number']).lower() != 'none' else ""
         
-        # Process text fields
-        product_name = wrap_text(str(row['Product']), 25)
+        # Process text fields with wrapping applied to Category
+        product_name = wrap_text(str(row['Product']), 30)  # Longer product names
+        category_wrapped = wrap_text(str(row['Category']), 12)  # Wrap category column
         batch_display = wrap_text(batch_number, 15, ['-', ' ']) if batch_number else ""
         package_display = truncate_package_number(row['Input_Package_Number']) if pd.notna(row['Input_Package_Number']) else ""
+        
+        # Handle Cases with wrapping
+        cases_display = wrap_text(str(row['Cases']), 8) if pd.notna(row['Cases']) and str(row['Cases']) != "" else ""
         
         table_data.append([
             str(row['Customer']),
             str(row['Order_Number']),
-            str(row['Category']),
+            category_wrapped,  # Now wrapped
             product_name,
             batch_display,
             package_display,
             str(row['Quantity']),
+            cases_display,  # Cases column (calculated)
             ""  # Empty Picked column for manual entry
         ])
     
-    # Create table with adjusted column widths for landscape
-    col_widths = [1.2*inch, 1*inch, 0.8*inch, 2.2*inch, 1*inch, 1*inch, 0.6*inch, 0.8*inch]
-    table = Table(table_data, colWidths=col_widths, repeatRows=1)
+    # Create table with expanded column widths for larger table (Cases after Qty)
+    col_widths = [1.3*inch, 1*inch, 0.9*inch, 2.5*inch, 1.1*inch, 1.1*inch, 0.6*inch, 0.6*inch, 0.8*inch]
     
-    # Professional colors
-    header_color = colors.Color(0.25, 0.45, 0.25)  # Dark green
-    alt_row_color = colors.Color(0.95, 0.97, 0.95)  # Very light green
-    border_color = colors.Color(0.4, 0.6, 0.4)     # Medium green
+    # Create table without header repetition
+    table = Table(table_data, colWidths=col_widths)
     
-    # Create alternating row styles
+    # Custom color scheme
+    primary_color = colors.Color(61/255, 192/255, 204/255)      # #3DC0CC - Primary teal
+    contrast_color = colors.Color(255/255, 202/255, 69/255)     # #FFCA45 - Yellow accent
+    alt_row_color = colors.Color(248/255, 252/255, 253/255)     # Very light teal
+    border_color = colors.Color(0.6, 0.6, 0.6)                 # Neutral gray for borders
+    
+    # Create table styles with prominent header (title-like)
     table_style = [
-        # Header row
-        ('BACKGROUND', (0, 0), (-1, 0), header_color),
+        # Header row - more prominent/title-like
+        ('BACKGROUND', (0, 0), (-1, 0), primary_color),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 9),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-        ('TOPPADDING', (0, 0), (-1, 0), 8),
+        ('FONTSIZE', (0, 0), (-1, 0), 12),  # Larger font size for title effect
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 15),  # More padding for prominence
+        ('TOPPADDING', (0, 0), (-1, 0), 15),     # More padding for prominence
         
         # Data rows
         ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 7),
-        ('GRID', (0, 0), (-1, -1), 0.5, border_color),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),  # Changed to TOP for wrapped text
+        ('FONTSIZE', (0, 1), (-1, -1), 8),
+        ('GRID', (0, 0), (-1, -1), 0.5, border_color),  # Neutral gray borders
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, alt_row_color]),
+        ('LEFTPADDING', (0, 0), (-1, -1), 4),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 1), (-1, -1), 6),     # Standard padding for data rows
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 6),  # Standard padding for data rows
     ]
     
     table.setStyle(TableStyle(table_style))
     elements.append(table)
     
-    # Simple footer function
+    # Simple footer function with just page info
     def add_page_footer(canvas, doc):
         """Add footer with page numbers and generation info"""
         canvas.saveState()
         
-        # Page number (simple approach)
+        page_width = landscape(A4)[0]
+        
+        # Page number and generation time
         page_num = canvas.getPageNumber()
         page_text = f"Page {page_num}"
-        
-        # Generation info
         gen_time = datetime.now().strftime('%m/%d/%Y %I:%M %p')
         gen_text = f"Generated: {gen_time}"
         
-        # Draw footer text
         canvas.setFont('Helvetica', 8)
         canvas.setFillColor(colors.Color(0.4, 0.4, 0.4))
         
         # Left side - generation time
-        canvas.drawString(0.5*inch, 0.3*inch, gen_text)
-        
-        # Right side - page number
-        canvas.drawRightString(landscape(A4)[0] - 0.5*inch, 0.3*inch, page_text)
+        canvas.drawString(0.3*inch, 0.3*inch, gen_text)
+        # Right side - page number  
+        canvas.drawRightString(page_width - 0.3*inch, 0.3*inch, page_text)
         
         canvas.restoreState()
     
-    # Build PDF with simple footer (no total page count for now)
+    # Build PDF with clean footer
     doc.build(elements, onFirstPage=add_page_footer, onLaterPages=add_page_footer)
     buffer.seek(0)
     return buffer
@@ -294,6 +340,16 @@ assembly_file = st.sidebar.file_uploader(
     help="Upload your assembly data CSV containing input/output package relationships from the last 3 days."
 )
 
+# Product List CSV Upload
+st.sidebar.subheader("📦 Product List")
+st.sidebar.markdown("**Current product catalog with case quantities**")
+product_file = st.sidebar.file_uploader(
+    "Upload Product List CSV:",
+    type=['csv'],
+    key="product_upload",
+    help="Upload your product list CSV to calculate cases needed. Uses Product Id to match with sales orders and divides quantity by units per case."
+)
+
 # Process button
 if st.sidebar.button("🚀 Process Data", type="primary", disabled=not (so_file and assembly_file)):
     with st.spinner("Processing your data..."):
@@ -302,18 +358,32 @@ if st.sidebar.button("🚀 Process Data", type="primary", disabled=not (so_file 
             so_df = load_csv_with_metadata_skip(so_file)
             assembly_df = load_csv_with_metadata_skip(assembly_file)
             
+            # Load product data if available (no metadata skip needed for this one)
+            product_df = None
+            if product_file:
+                try:
+                    product_df = pd.read_csv(product_file)
+                    st.session_state.product_data = product_df
+                    st.info(f"Product List: {len(product_df):,} products loaded")
+                except Exception as e:
+                    st.warning(f"Could not load Product List: {str(e)}. Continuing without case quantities.")
+            
             if so_df is None or assembly_df is None:
-                st.error("❌ Failed to load one or both CSV files. Please check your file formats.")
+                st.error("❌ Failed to load required CSV files. Please check your file formats.")
                 st.stop()
             
             st.session_state.so_data = so_df
             st.session_state.assembly_data = assembly_df
             
+            file_info = f"Sales Orders: {len(so_df):,} rows | Assembly Data: {len(assembly_df):,} rows"
+            if product_df is not None:
+                file_info += f" | Products: {len(product_df):,} rows"
+            
             st.success(f"✅ Files loaded successfully!")
-            st.info(f"Sales Orders: {len(so_df):,} rows | Assembly Data: {len(assembly_df):,} rows")
+            st.info(file_info)
             
             # Process the data
-            processed_df = process_data(so_df, assembly_df)
+            processed_df = process_data(so_df, assembly_df, product_df)
             
             if processed_df is not None:
                 st.session_state.processed_data = processed_df
@@ -423,7 +493,7 @@ if st.session_state.processed_data is not None:
         st.header("📊 Data Overview")
         
         # Summary metrics
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             st.metric("🛒 Total Orders", len(processed_df['Order_Number'].unique()))
         with col2:
@@ -432,6 +502,14 @@ if st.session_state.processed_data is not None:
             st.metric("📦 Total Items", len(processed_df))
         with col4:
             st.metric("🏷️ Categories", len(processed_df['Category'].unique()))
+        with col5:
+            # Show cases calculation coverage if product data was loaded
+            if 'Cases' in processed_df.columns:
+                cases_coverage = processed_df['Cases'].notna().sum()
+                coverage_pct = (cases_coverage / len(processed_df) * 100) if len(processed_df) > 0 else 0
+                st.metric("📦 Cases Coverage", f"{coverage_pct:.0f}%")
+            else:
+                st.metric("📦 Cases Coverage", "0%")
         
         # Show breakdown by category
         st.subheader("📈 Category Breakdown")
@@ -443,6 +521,39 @@ if st.session_state.processed_data is not None:
         customer_counts = processed_df['Customer'].value_counts().head(10)
         st.bar_chart(customer_counts)
         
+        # Show case analysis if available
+        if 'Cases' in processed_df.columns and processed_df['Cases'].notna().sum() > 0:
+            st.subheader("📦 Cases Analysis")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Items with calculated cases
+                items_with_cases = processed_df[processed_df['Cases'].notna() & (processed_df['Cases'] != "")]
+                st.write(f"**Items with Cases Calculated:** {len(items_with_cases):,} of {len(processed_df):,}")
+                
+                if len(items_with_cases) > 0:
+                    # Convert to numeric for analysis
+                    cases_numeric = pd.to_numeric(items_with_cases['Cases'], errors='coerce')
+                    cases_numeric = cases_numeric.dropna()
+                    
+                    if len(cases_numeric) > 0:
+                        st.write(f"**Average Cases per Line:** {cases_numeric.mean():.2f}")
+                        st.write(f"**Total Cases:** {cases_numeric.sum():.2f}")
+                        st.write(f"**Largest Line:** {cases_numeric.max():.2f} cases")
+            
+            with col2:
+                # Cases distribution
+                if len(items_with_cases) > 0:
+                    # Group cases into ranges for better visualization
+                    cases_numeric = pd.to_numeric(items_with_cases['Cases'], errors='coerce').dropna()
+                    if len(cases_numeric) > 0:
+                        # Create ranges
+                        cases_ranges = pd.cut(cases_numeric, bins=[0, 0.5, 1, 2, 5, 10, float('inf')], 
+                                            labels=['< 0.5', '0.5-1', '1-2', '2-5', '5-10', '10+'])
+                        cases_range_counts = cases_ranges.value_counts().sort_index()
+                        st.write("**Cases Distribution:**")
+                        st.bar_chart(cases_range_counts)
+        
         # Show raw data with search
         st.subheader("🔍 Full Dataset")
         st.dataframe(processed_df, use_container_width=True)
@@ -450,18 +561,19 @@ if st.session_state.processed_data is not None:
 else:
     # Welcome screen when no data is loaded
     if not so_file and not assembly_file:
-        st.info("👈 Upload both CSV files in the sidebar to get started")
+        st.info("👈 Upload the required CSV files in the sidebar to get started")
         
         # Show helpful information
         with st.expander("ℹ️ How it Works", expanded=True):
             st.markdown("""
             **📋 Upload** → **🔄 Process** → **🎯 Filter** → **📥 Download**
             
-            This tool processes your sales order and assembly data to create custom pick lists with input package tracking.
+            This tool processes your sales order, assembly, and product data to create custom pick lists with input package tracking and calculated case requirements.
             
             **Key Features:**
             - 🔗 Links Package Labels to Assembly Numbers
             - 🔍 Finds Input Package Numbers for tracking
+            - 📦 Calculates cases needed (Quantity ÷ Units Per Case)
             - 📑 Generates formatted PDF reports with pick checkboxes
             - 🎯 Filter by customer, order, or category
             - 📊 Data overview and analytics
@@ -469,22 +581,38 @@ else:
         
         with st.expander("📁 CSV File Requirements"):
             st.markdown("""
-            **Sales Order Item History CSV:**
+            **Sales Order Item History CSV:** *(Required)*
             - Status: Processing orders only
             - Date Range: Past 30 days
-            - Required columns: Customer, Order Number, Category, Product, Package Batch Number, Package Label, Quantity
+            - Required columns: Customer, Order Number, Category, Product, Product Id, Package Batch Number, Package Label, Quantity
             
-            **Assembly Data CSV:**
+            **Assembly Data CSV:** *(Required)*
             - Date Range: Last 3 days
             - Required columns: Input/Output, Package Number, Assembly Number
             - Both input and output records needed for proper linking
             
-            *The tool automatically handles metadata lines and column mapping.*
+            **Product List CSV:** *(Optional)*
+            - Current product catalog
+            - Required columns: ID, Units Per Case
+            - Used to calculate cases needed by dividing quantity by units per case
+            
+            *The tool automatically handles metadata lines and column mapping for Sales Order and Assembly files.*
             """)
     
     elif so_file and assembly_file:
         st.info("👈 Click the 'Process Data' button in the sidebar to analyze your files")
+        if product_file:
+            st.info("📦 Product List detected - cases will be calculated in the report")
+        else:
+            st.info("💡 Tip: Upload a Product List CSV to include calculated cases in your pick list")
     
     else:
-        missing_file = "Assembly Data" if so_file else "Sales Order Item History"
-        st.warning(f"📁 Please upload the {missing_file} CSV file to continue")
+        missing_files = []
+        if not so_file:
+            missing_files.append("Sales Order Item History")
+        if not assembly_file:
+            missing_files.append("Assembly Data")
+        
+        st.warning(f"📁 Please upload the {' and '.join(missing_files)} CSV file(s) to continue")
+        if product_file and not (so_file and assembly_file):
+            st.info("📦 Product List uploaded - add the other required files to process data")
