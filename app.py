@@ -12,13 +12,13 @@ from datetime import datetime
 
 # Set page config
 st.set_page_config(
-    page_title="CSV Processing Tool",
-    page_icon="📊",
+    page_title="Sales Order Pick List Generator",
+    page_icon="📦",
     layout="wide"
 )
 
-st.title("📊 Sales Order & Assembly Data Processor")
-st.markdown("Upload your Sales Orders and Assembly data to generate custom pick lists and reports")
+st.title("📦 Sales Order Pick List Generator")
+st.markdown("Generate custom pick lists from your sales order and assembly data with input package tracking")
 
 # Initialize session state
 if 'processed_data' not in st.session_state:
@@ -125,7 +125,7 @@ def process_data(so_df, assembly_df):
 # Function to generate PDF
 def generate_pdf(df, selected_filters=None):
     """
-    Generate a styled PDF report with landscape orientation and Haven-style colors
+    Generate a styled PDF report with landscape orientation and professional colors
     """
     buffer = io.BytesIO()
     
@@ -214,7 +214,7 @@ def generate_pdf(df, selected_filters=None):
     col_widths = [1.2*inch, 1*inch, 0.8*inch, 2.2*inch, 1*inch, 1*inch, 0.6*inch, 0.8*inch]
     table = Table(table_data, colWidths=col_widths, repeatRows=1)
     
-    # Haven-style colors (cannabis industry appropriate)
+    # Professional colors
     header_color = colors.Color(0.25, 0.45, 0.25)  # Dark green
     alt_row_color = colors.Color(0.95, 0.97, 0.95)  # Very light green
     border_color = colors.Color(0.4, 0.6, 0.4)     # Medium green
@@ -271,153 +271,220 @@ def generate_pdf(df, selected_filters=None):
     buffer.seek(0)
     return buffer
 
-# File upload section
-st.header("Upload CSV Files")
-col1, col2 = st.columns(2)
+# Sidebar for file uploads
+st.sidebar.header("📊 Data Sources")
 
-with col1:
-    so_file = st.file_uploader(
-        "Sales Orders CSV",
-        type=['csv'],
-        key="so_upload"
-    )
-    
-with col2:
-    assembly_file = st.file_uploader(
-        "Assembly Data CSV", 
-        type=['csv'],
-        key="assembly_upload"
-    )
+# Sales Order Item History CSV Upload
+st.sidebar.subheader("📋 Sales Order Item History")
+st.sidebar.markdown("**All Sales Orders with a status of Processing and an order date within the past 30 days**")
+so_file = st.sidebar.file_uploader(
+    "Upload Sales Order Item History CSV:",
+    type=['csv'],
+    key="so_upload",
+    help="Upload your sales order CSV with processing orders from the last 30 days. The tool will automatically handle metadata lines and column mapping."
+)
 
-# Process files when both are uploaded
-if so_file and assembly_file:
-    try:
-        # Load the data using our custom function that skips metadata
-        so_df = load_csv_with_metadata_skip(so_file)
-        assembly_df = load_csv_with_metadata_skip(assembly_file)
-        
-        if so_df is None or assembly_df is None:
-            st.stop()
-        
-        st.session_state.so_data = so_df
-        st.session_state.assembly_data = assembly_df
-        
-        st.success(f"✅ Files loaded successfully!")
-        st.info(f"Sales Orders: {len(so_df)} rows, Assembly Data: {len(assembly_df)} rows")
-        
-        # Process the data
-        with st.spinner("Processing data..."):
+# Assembly Data CSV Upload  
+st.sidebar.subheader("🔧 Assembly Data")
+st.sidebar.markdown("**Assemblies from the Last 3 Days**")
+assembly_file = st.sidebar.file_uploader(
+    "Upload Assembly Data CSV:",
+    type=['csv'],
+    key="assembly_upload",
+    help="Upload your assembly data CSV containing input/output package relationships from the last 3 days."
+)
+
+# Process button
+if st.sidebar.button("🚀 Process Data", type="primary", disabled=not (so_file and assembly_file)):
+    with st.spinner("Processing your data..."):
+        try:
+            # Load the data using our custom function that skips metadata
+            so_df = load_csv_with_metadata_skip(so_file)
+            assembly_df = load_csv_with_metadata_skip(assembly_file)
+            
+            if so_df is None or assembly_df is None:
+                st.error("❌ Failed to load one or both CSV files. Please check your file formats.")
+                st.stop()
+            
+            st.session_state.so_data = so_df
+            st.session_state.assembly_data = assembly_df
+            
+            st.success(f"✅ Files loaded successfully!")
+            st.info(f"Sales Orders: {len(so_df):,} rows | Assembly Data: {len(assembly_df):,} rows")
+            
+            # Process the data
             processed_df = process_data(so_df, assembly_df)
             
-        if processed_df is not None:
-            st.session_state.processed_data = processed_df
-            
-            st.success(f"✅ Processed {len(processed_df)} records")
-            
-            # Filter section
-            st.header("Create Custom Pick List")
-            
-            col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
-            
-            with col1:
-                customers = sorted(processed_df['Customer'].unique().tolist())
-                selected_customers = st.multiselect("Select Customers", customers)
+            if processed_df is not None:
+                st.session_state.processed_data = processed_df
+                st.success(f"✅ Successfully processed {len(processed_df):,} records")
+            else:
+                st.error("❌ Failed to process data. Please check your CSV file structure.")
                 
-            with col2:
-                if selected_customers:
-                    filtered_orders = processed_df[processed_df['Customer'].isin(selected_customers)]['Order_Number'].unique()
-                else:
-                    filtered_orders = processed_df['Order_Number'].unique()
-                orders = sorted(filtered_orders.tolist())
-                selected_orders = st.multiselect("Select Order Numbers", orders)
-                
-            with col3:
-                if selected_customers:
-                    filtered_categories = processed_df[processed_df['Customer'].isin(selected_customers)]['Category'].unique()
-                elif selected_orders:
-                    filtered_categories = processed_df[processed_df['Order_Number'].isin(selected_orders)]['Category'].unique()
-                else:
-                    filtered_categories = processed_df['Category'].unique()
-                categories = sorted(filtered_categories.tolist())
-                selected_categories = st.multiselect("Select Categories", categories)
-                
-            with col4:
-                st.write("")  # Empty space
-                st.write("")  # Empty space
-                generate_pdf_btn = st.button("📑 Generate PDF", type="primary")
-            
-            # Apply filters
-            filtered_df = processed_df.copy()
-            
-            applied_filters = {}
-            
-            if selected_customers:
-                filtered_df = filtered_df[filtered_df['Customer'].isin(selected_customers)]
-                applied_filters['Customers'] = selected_customers
-                
-            if selected_orders:
-                filtered_df = filtered_df[filtered_df['Order_Number'].isin(selected_orders)]
-                applied_filters['Order Numbers'] = selected_orders
-                
-            if selected_categories:
-                filtered_df = filtered_df[filtered_df['Category'].isin(selected_categories)]
-                applied_filters['Categories'] = selected_categories
-            
-            # Show filtered results
-            st.subheader(f"Pick List Results ({len(filtered_df)} records)")
-            st.dataframe(filtered_df, use_container_width=True)
-            
-            # Download section
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # CSV download
-                csv = filtered_df.to_csv(index=False)
-                st.download_button(
-                    label="📄 Download CSV",
-                    data=csv,
-                    file_name=f"pick_list_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-            
-            with col2:
-                # PDF download (triggered by the button above)
-                if generate_pdf_btn:
-                    with st.spinner("Generating PDF..."):
-                        pdf_buffer = generate_pdf(filtered_df, applied_filters)
-                        
-                    # Immediately trigger download
-                    st.download_button(
-                        label="📑 Download PDF",
-                        data=pdf_buffer,
-                        file_name=f"pick_list_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        key="pdf_download"
-                    )
-                    # Auto-click the download (this will work in newer Streamlit versions)
-                    st.success("✅ PDF ready for download!")
-                else:
-                    # Show placeholder when PDF not generated
-                    st.button("📑 Download PDF", disabled=True, help="Click 'Generate PDF' button above first")
+        except Exception as e:
+            st.error(f"❌ Error processing files: {str(e)}")
+
+# Main content area
+if st.session_state.processed_data is not None:
+    processed_df = st.session_state.processed_data
+    
+    # Create tabs for better organization
+    tab1, tab2 = st.tabs(["🎯 Pick List Generator", "📊 Data Overview"])
+    
+    with tab1:
+        st.header("🎯 Create Custom Pick List")
         
-    except Exception as e:
-        st.error(f"Error loading files: {str(e)}")
-        st.info("Please make sure your CSV files are properly formatted.")
+        # Filter section
+        col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
+        
+        with col1:
+            customers = sorted(processed_df['Customer'].unique().tolist())
+            selected_customers = st.multiselect("Select Customers", customers)
+            
+        with col2:
+            if selected_customers:
+                filtered_orders = processed_df[processed_df['Customer'].isin(selected_customers)]['Order_Number'].unique()
+            else:
+                filtered_orders = processed_df['Order_Number'].unique()
+            orders = sorted(filtered_orders.tolist())
+            selected_orders = st.multiselect("Select Order Numbers", orders)
+            
+        with col3:
+            if selected_customers:
+                filtered_categories = processed_df[processed_df['Customer'].isin(selected_customers)]['Category'].unique()
+            elif selected_orders:
+                filtered_categories = processed_df[processed_df['Order_Number'].isin(selected_orders)]['Category'].unique()
+            else:
+                filtered_categories = processed_df['Category'].unique()
+            categories = sorted(filtered_categories.tolist())
+            selected_categories = st.multiselect("Select Categories", categories)
+            
+        with col4:
+            st.write("")  # Empty space
+            st.write("")  # Empty space
+            generate_pdf_btn = st.button("📑 Generate PDF", type="primary")
+        
+        # Apply filters
+        filtered_df = processed_df.copy()
+        
+        applied_filters = {}
+        
+        if selected_customers:
+            filtered_df = filtered_df[filtered_df['Customer'].isin(selected_customers)]
+            applied_filters['Customers'] = selected_customers
+            
+        if selected_orders:
+            filtered_df = filtered_df[filtered_df['Order_Number'].isin(selected_orders)]
+            applied_filters['Order Numbers'] = selected_orders
+            
+        if selected_categories:
+            filtered_df = filtered_df[filtered_df['Category'].isin(selected_categories)]
+            applied_filters['Categories'] = selected_categories
+        
+        # Show filtered results
+        st.subheader(f"📋 Pick List Results ({len(filtered_df):,} records)")
+        st.dataframe(filtered_df, use_container_width=True)
+        
+        # Download section
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # CSV download
+            csv = filtered_df.to_csv(index=False)
+            st.download_button(
+                label="📄 Download CSV",
+                data=csv,
+                file_name=f"pick_list_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        with col2:
+            # PDF download (triggered by the button above)
+            if generate_pdf_btn:
+                with st.spinner("Generating PDF report..."):
+                    pdf_buffer = generate_pdf(filtered_df, applied_filters)
+                    
+                # Immediately trigger download
+                st.download_button(
+                    label="📑 Download PDF Report",
+                    data=pdf_buffer,
+                    file_name=f"pick_list_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key="pdf_download"
+                )
+                st.success("✅ PDF report generated successfully!")
+            else:
+                # Show placeholder when PDF not generated
+                st.button("📑 Download PDF Report", disabled=True, help="Click 'Generate PDF' button above first", use_container_width=True)
+    
+    with tab2:
+        st.header("📊 Data Overview")
+        
+        # Summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("🛒 Total Orders", len(processed_df['Order_Number'].unique()))
+        with col2:
+            st.metric("👥 Unique Customers", len(processed_df['Customer'].unique()))
+        with col3:
+            st.metric("📦 Total Items", len(processed_df))
+        with col4:
+            st.metric("🏷️ Categories", len(processed_df['Category'].unique()))
+        
+        # Show breakdown by category
+        st.subheader("📈 Category Breakdown")
+        category_counts = processed_df['Category'].value_counts()
+        st.bar_chart(category_counts)
+        
+        # Show breakdown by customer
+        st.subheader("👥 Customer Breakdown")
+        customer_counts = processed_df['Customer'].value_counts().head(10)
+        st.bar_chart(customer_counts)
+        
+        # Show raw data with search
+        st.subheader("🔍 Full Dataset")
+        st.dataframe(processed_df, use_container_width=True)
 
 else:
-    st.info("👆 Upload both CSV files to get started")
-    
-    # Show some helpful information
-    with st.expander("ℹ️ How it works"):
-        st.markdown("""
-        **Upload** → **Filter** → **Download**: Process your Sales Orders and Assembly data to create custom pick lists with input package tracking.
+    # Welcome screen when no data is loaded
+    if not so_file and not assembly_file:
+        st.info("👈 Upload both CSV files in the sidebar to get started")
         
-        **Features:** Links Package Labels to Assembly Numbers, finds Input Package Numbers, generates formatted PDF reports.
-        """)
+        # Show helpful information
+        with st.expander("ℹ️ How it Works", expanded=True):
+            st.markdown("""
+            **📋 Upload** → **🔄 Process** → **🎯 Filter** → **📥 Download**
+            
+            This tool processes your sales order and assembly data to create custom pick lists with input package tracking.
+            
+            **Key Features:**
+            - 🔗 Links Package Labels to Assembly Numbers
+            - 🔍 Finds Input Package Numbers for tracking
+            - 📑 Generates formatted PDF reports with pick checkboxes
+            - 🎯 Filter by customer, order, or category
+            - 📊 Data overview and analytics
+            """)
+        
+        with st.expander("📁 CSV File Requirements"):
+            st.markdown("""
+            **Sales Order Item History CSV:**
+            - Status: Processing orders only
+            - Date Range: Past 30 days
+            - Required columns: Customer, Order Number, Category, Product, Package Batch Number, Package Label, Quantity
+            
+            **Assembly Data CSV:**
+            - Date Range: Last 3 days
+            - Required columns: Input/Output, Package Number, Assembly Number
+            - Both input and output records needed for proper linking
+            
+            *The tool automatically handles metadata lines and column mapping.*
+            """)
     
-    with st.expander("📁 CSV Format"):
-        st.markdown("""
-        Export your CSV files directly from your system. The tool automatically handles metadata lines and column mapping.
-        """)
+    elif so_file and assembly_file:
+        st.info("👈 Click the 'Process Data' button in the sidebar to analyze your files")
+    
+    else:
+        missing_file = "Assembly Data" if so_file else "Sales Order Item History"
+        st.warning(f"📁 Please upload the {missing_file} CSV file to continue")
