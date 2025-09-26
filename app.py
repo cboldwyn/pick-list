@@ -12,13 +12,13 @@ from datetime import datetime
 
 # Set page config
 st.set_page_config(
-    page_title="Sales Order Pick List Generator",
+    page_title="Haven Cannabis - Pick List Generator",
     page_icon="📦",
     layout="wide"
 )
 
-st.title("📦 Sales Order Pick List Generator")
-st.markdown("Generate custom pick lists from your sales order and assembly data with input package tracking")
+st.title("📦 Sales Order Pick List Generator v1.1")
+st.markdown("**Haven Cannabis** | Generate custom pick lists with input package tracking")
 
 # Initialize session state
 if 'processed_data' not in st.session_state:
@@ -61,6 +61,15 @@ def process_data(so_df, assembly_df, product_df=None):
     Replicates the Google Sheets QUERY formula logic based on actual CSV structure
     """
     try:
+        # Filter sales orders to only include "Processing" status
+        if 'Status' in so_df.columns:
+            initial_count = len(so_df)
+            so_df = so_df[so_df['Status'] == 'Processing'].copy()
+            filtered_count = len(so_df)
+            st.info(f"Status filter: {filtered_count:,} Processing orders from {initial_count:,} total records")
+        else:
+            st.warning("No 'Status' column found in Sales Order data - processing all records")
+        
         # Extract relevant columns from Sales Orders using actual column names
         so_columns = {
             'Customer': so_df['Customer'],
@@ -73,18 +82,24 @@ def process_data(so_df, assembly_df, product_df=None):
             'Quantity': so_df['Quantity']
         }
         
-        # Add Delivery Date if it exists, converting to date-only format
+        # Add Delivery Date if it exists, converting to "Mon 9/29" format
         if 'Delivery Date' in so_df.columns:
-            # Convert to date-only format, removing time
+            # Convert to "Mon 9/29" format (3 letter day + M/DD)
             delivery_dates = []
             for date_val in so_df['Delivery Date']:
                 if pd.notna(date_val):
                     try:
-                        # Convert to datetime and extract date only in MM/DD/YYYY format
+                        # Convert to datetime and format as "Mon 9/29"
                         if isinstance(date_val, str):
-                            parsed_date = pd.to_datetime(date_val).strftime('%m/%d/%Y')
+                            dt = pd.to_datetime(date_val)
                         else:
-                            parsed_date = pd.to_datetime(date_val).strftime('%m/%d/%Y')
+                            dt = pd.to_datetime(date_val)
+                        
+                        # Format as "Mon 9/29" (3 letter day + M/DD)
+                        day_name = dt.strftime('%a')  # 3 letter day name
+                        month = str(dt.month)  # Month without leading zero
+                        day = str(dt.day)  # Day without leading zero
+                        parsed_date = f"{day_name} {month}/{day}"
                         delivery_dates.append(parsed_date)
                     except:
                         delivery_dates.append("")
@@ -249,8 +264,8 @@ def truncate_package_number(package_text):
         return str(package_text)
     return str(package_text)[-14:]
 
-def add_page_footer(canvas, doc, page_size, unique_customers, unique_sales_orders):
-    """Add footer with page numbers, generation info, and customer/SO info on all pages"""
+def add_page_footer(canvas, doc, page_size, unique_customers, unique_sales_orders, unique_delivery_dates):
+    """Add footer with page numbers, generation info, customer/SO/delivery date info on all pages"""
     canvas.saveState()
     
     page_width = page_size[0]
@@ -269,7 +284,7 @@ def add_page_footer(canvas, doc, page_size, unique_customers, unique_sales_order
     # Right side - page number  
     canvas.drawRightString(page_width - 0.3*inch, 0.3*inch, page_text)
     
-    # Center - Customer and SO info (on all pages, no labels)
+    # Center - Customer, SO, and Delivery Date info (on all pages, no labels)
     center_info_parts = []
     
     # Add customer info (always show if customers exist)
@@ -288,6 +303,14 @@ def add_page_footer(canvas, doc, page_size, unique_customers, unique_sales_order
             so_text = f"{', '.join(unique_sales_orders[:3])} + {len(unique_sales_orders)-3} more"
         center_info_parts.append(so_text)
     
+    # Add delivery date info with "Delivery:" prefix
+    if unique_delivery_dates:
+        if len(unique_delivery_dates) <= 3:
+            delivery_text = f"Delivery: {', '.join(unique_delivery_dates)}"
+        else:
+            delivery_text = f"Delivery: {', '.join(unique_delivery_dates[:2])} + {len(unique_delivery_dates)-2} more"
+        center_info_parts.append(delivery_text)
+    
     # Display center info if we have any
     if center_info_parts:
         center_text = " | ".join(center_info_parts)
@@ -299,10 +322,32 @@ def add_page_footer(canvas, doc, page_size, unique_customers, unique_sales_order
     canvas.restoreState()
 
 # Function to generate PDF
+def generate_document_title(unique_customers, unique_sales_orders):
+    """Generate document title and filename based on customers and sales orders"""
+    if len(unique_customers) == 1 and len(unique_sales_orders) == 1:
+        return f"Pick List {unique_customers[0]} {unique_sales_orders[0]}"
+    elif len(unique_customers) == 1:
+        if len(unique_sales_orders) <= 3:
+            return f"Pick List {unique_customers[0]} {' '.join(unique_sales_orders)}"
+        else:
+            return f"Pick List {unique_customers[0]} Multi-SO"
+    elif len(unique_sales_orders) == 1:
+        if len(unique_customers) <= 2:
+            return f"Pick List {' '.join(unique_customers)} {unique_sales_orders[0]}"
+        else:
+            return f"Pick List Multi-Customer {unique_sales_orders[0]}"
+    else:
+        return "Pick List Multi-Customer Multi-SO"
+
 def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_order=False, portrait_mode=False):
     """
     Generate a styled PDF report with landscape or portrait orientation and custom color scheme
     """
+    # Create document title and file name based on data
+    unique_customers = sorted(df['Customer'].unique())
+    unique_sales_orders = sorted(df['Order_Number'].unique())
+    doc_title = generate_document_title(unique_customers, unique_sales_orders)
+    
     buffer = io.BytesIO()
     
     # Choose orientation based on user preference
@@ -310,11 +355,13 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
     if portrait_mode:
         page_size = A4
         doc = SimpleDocTemplate(buffer, pagesize=A4, 
+                              title=doc_title,  # Set PDF document title
                               topMargin=0.5*inch, bottomMargin=0.5*inch,
                               leftMargin=0.3*inch, rightMargin=0.3*inch)
     else:
         page_size = landscape(A4)
         doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), 
+                              title=doc_title,  # Set PDF document title
                               topMargin=0.5*inch, bottomMargin=0.5*inch,
                               leftMargin=0.3*inch, rightMargin=0.3*inch)
     
@@ -347,9 +394,16 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
             filter_para = Paragraph(filter_text, filter_style)
             elements.append(filter_para)
     
-    # Extract unique customers and sales orders for footer
-    unique_customers = sorted(df['Customer'].unique())
-    unique_sales_orders = sorted(df['Order_Number'].unique())
+    # Extract unique customers, sales orders, and delivery dates for footer (reuse from title generation)
+    # unique_customers and unique_sales_orders already extracted above for document title
+    
+    # Extract unique delivery dates if the column exists
+    unique_delivery_dates = []
+    if 'Delivery_Date' in df.columns:
+        delivery_dates = df['Delivery_Date'].dropna()
+        delivery_dates = delivery_dates[delivery_dates != ""]  # Remove empty strings
+        if len(delivery_dates) > 0:
+            unique_delivery_dates = sorted(delivery_dates.unique())
     
     # Build headers and column widths based on visibility options and orientation
     headers = []
@@ -440,16 +494,17 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
     # Create table with header repetition
     table = Table(table_data, colWidths=col_widths, repeatRows=1)
     
-    # Custom color scheme
-    primary_color = colors.Color(61/255, 192/255, 204/255)      # #3DC0CC - Primary teal
-    contrast_color = colors.Color(255/255, 202/255, 69/255)     # #FFCA45 - Yellow accent
-    alt_row_color = colors.Color(248/255, 252/255, 253/255)     # Very light teal
-    border_color = colors.Color(0.6, 0.6, 0.6)                 # Neutral gray for borders
+    # Haven Cannabis brand color scheme
+    haven_teal = colors.Color(61/255, 192/255, 204/255)        # #3DC0CC - Haven primary teal
+    haven_gold = colors.Color(255/255, 202/255, 69/255)        # #FFCA45 - Haven gold accent  
+    haven_purple = colors.Color(146/255, 39/255, 143/255)      # Haven purple (estimated)
+    alt_row_color = colors.Color(248/255, 252/255, 253/255)    # Very light teal
+    border_color = colors.Color(0.6, 0.6, 0.6)                # Neutral gray for borders
     
-    # Create table styles with prominent header and proper vertical alignment
+    # Create table styles with Haven branding and proper vertical alignment
     table_style = [
-        # Header row - more prominent/title-like
-        ('BACKGROUND', (0, 0), (-1, 0), primary_color),
+        # Header row - Haven teal branding
+        ('BACKGROUND', (0, 0), (-1, 0), haven_teal),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),          # Horizontal center
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),         # Vertical center for ALL cells
@@ -477,7 +532,7 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
     
     # Create footer callback with closure to pass variables
     def footer_callback(canvas, doc):
-        return add_page_footer(canvas, doc, page_size, unique_customers, unique_sales_orders)
+        return add_page_footer(canvas, doc, page_size, unique_customers, unique_sales_orders, unique_delivery_dates)
     
     # Build PDF with footer
     doc.build(elements, onFirstPage=footer_callback, onLaterPages=footer_callback)
@@ -488,33 +543,27 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
 st.sidebar.header("📊 Data Sources")
 
 # Sales Order Item History CSV Upload
-st.sidebar.subheader("📋 Sales Order Item History")
-st.sidebar.markdown("**All Sales Orders with a status of Processing and an order date within the past 30 days**")
+st.sidebar.subheader("📋 Sales Orders")
 so_file = st.sidebar.file_uploader(
-    "Upload Sales Order Item History CSV:",
+    "Processing orders from last 30 days",
     type=['csv'],
-    key="so_upload",
-    help="Upload your sales order CSV with processing orders from the last 30 days. The tool will automatically handle metadata lines and column mapping."
+    key="so_upload"
 )
 
 # Assembly Data CSV Upload  
 st.sidebar.subheader("🔧 Assembly Data")
-st.sidebar.markdown("**Assemblies from the Last 3 Days**")
 assembly_file = st.sidebar.file_uploader(
-    "Upload Assembly Data CSV:",
+    "Assembly data from last 3 days",
     type=['csv'],
-    key="assembly_upload",
-    help="Upload your assembly data CSV containing input/output package relationships from the last 3 days."
+    key="assembly_upload"
 )
 
 # Product List CSV Upload
 st.sidebar.subheader("📦 Product List")
-st.sidebar.markdown("**Current product catalog with case quantities**")
 product_file = st.sidebar.file_uploader(
-    "Upload Product List CSV:",
+    "Product catalog with case quantities",
     type=['csv'],
-    key="product_upload",
-    help="Upload your product list CSV to calculate cases needed. Uses Product Id to match with sales orders and divides quantity by units per case."
+    key="product_upload"
 )
 
 # Process button
@@ -657,11 +706,16 @@ if st.session_state.processed_data is not None:
                     
                     pdf_buffer = generate_pdf(filtered_df, applied_filters, hide_customer, hide_sales_order, portrait_mode)
                     
+                # Generate dynamic filename based on data
+                unique_customers = sorted(filtered_df['Customer'].unique())
+                unique_sales_orders = sorted(filtered_df['Order_Number'].unique())
+                filename = generate_document_title(unique_customers, unique_sales_orders) + ".pdf"
+                
                 # Immediately trigger download
                 st.download_button(
                     label="📑 Download PDF Report",
                     data=pdf_buffer,
-                    file_name=f"pick_list_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    file_name=filename,
                     mime="application/pdf",
                     use_container_width=True,
                     key="pdf_download"
@@ -750,7 +804,7 @@ else:
             st.markdown("""
             **📋 Upload** → **🔄 Process** → **🎯 Filter** → **📥 Download**
             
-            This tool processes your sales order, assembly, and product data to create custom pick lists with input package tracking and calculated case requirements.
+            **Haven Cannabis Pick List Generator v1.1** processes your sales order, assembly, and product data to create custom pick lists with input package tracking and calculated case requirements.
             
             **Key Features:**
             - 🔗 Links Package Labels to Assembly Numbers
@@ -760,28 +814,26 @@ else:
             - 🎯 Filter by customer, order, or category
             - 📊 Data overview and analytics
             - 📋 Clean product-focused layout (Customer/SO columns optional)
-            - 🗓️ Organized footer with generation time, customers, and sales orders
+            - 🗓️ Organized footer with generation time, customers, sales orders, and delivery dates
+            - ✅ Auto-filters to Processing orders only
             """)
         
         with st.expander("📁 CSV File Requirements"):
             st.markdown("""
             **Sales Order Item History CSV:** *(Required)*
-            - Status: Processing orders only
-            - Date Range: Past 30 days
-            - Required columns: Customer, Order Number, Category, Product, Product Id, Package Batch Number, Package Label, Quantity
-            - Note: "Order Number" column will display as "Sales Order" in reports
+            - Auto-filters to Processing status only
+            - Required columns: Customer, Order Number, Category, Product, Product Id, Package Batch Number, Package Label, Quantity, Status
+            - Optional: Delivery Date (formatted as "Mon 9/29" in reports)
             
-            **Assembly Data CSV:** *(Required)*
-            - Date Range: Last 3 days
+            **Assembly Data CSV:** *(Required)*  
             - Required columns: Input/Output, Package Number, Assembly Number
             - Both input and output records needed for proper linking
             
             **Product List CSV:** *(Optional)*
-            - Current product catalog
             - Required columns: ID, Units Per Case
-            - Used to calculate cases needed by dividing quantity by units per case
+            - Enables case quantity calculations (Quantity ÷ Units Per Case)
             
-            *The tool automatically handles metadata lines and column mapping for Sales Order and Assembly files.*
+            *Sales Order and Assembly files: Tool auto-handles metadata lines and column mapping.*
             """)
     
     elif so_file and assembly_file:
