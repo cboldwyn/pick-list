@@ -73,6 +73,25 @@ def process_data(so_df, assembly_df, product_df=None):
             'Quantity': so_df['Quantity']
         }
         
+        # Add Delivery Date if it exists, converting to date-only format
+        if 'Delivery Date' in so_df.columns:
+            # Convert to date-only format, removing time
+            delivery_dates = []
+            for date_val in so_df['Delivery Date']:
+                if pd.notna(date_val):
+                    try:
+                        # Convert to datetime and extract date only in MM/DD/YYYY format
+                        if isinstance(date_val, str):
+                            parsed_date = pd.to_datetime(date_val).strftime('%m/%d/%Y')
+                        else:
+                            parsed_date = pd.to_datetime(date_val).strftime('%m/%d/%Y')
+                        delivery_dates.append(parsed_date)
+                    except:
+                        delivery_dates.append("")
+                else:
+                    delivery_dates.append("")
+            so_columns['Delivery_Date'] = delivery_dates
+        
         # Create base dataframe
         result_df = pd.DataFrame(so_columns)
         
@@ -124,25 +143,30 @@ def process_data(so_df, assembly_df, product_df=None):
                         # Round to 2 decimal places for display
                         cases.append(round(calculated_cases, 2))
                     else:
-                        cases.append("")
+                        cases.append(None)  # Use None instead of empty string
                 except:
-                    cases.append("")
+                    cases.append(None)  # Use None instead of empty string
         else:
             # No product data available
-            cases = [""] * len(result_df)
+            cases = [None] * len(result_df)  # Use None instead of empty string
         
         result_df['Cases'] = cases
         
         # Remove the Lookup_Value and Product_ID columns as they're not needed in the final output
         result_df = result_df.drop(['Lookup_Value', 'Product_ID'], axis=1)
         
-        # Reorder columns with Cases as second to last (after Quantity, before Picked will be added in PDF)
-        columns_order = ['Customer', 'Order_Number', 'Category', 'Product', 'Batch_Number', 'Input_Package_Number', 'Quantity', 'Cases']
+        # Reorder columns - put Delivery_Date in the final dataframe but not displayed in PDF table
+        base_columns = ['Customer', 'Order_Number', 'Category', 'Product', 'Batch_Number', 'Input_Package_Number', 'Quantity', 'Cases']
+        if 'Delivery_Date' in result_df.columns:
+            columns_order = base_columns + ['Delivery_Date']
+        else:
+            columns_order = base_columns
+        
         result_df = result_df[columns_order]
         
-        # Filter out null customers and sort (replicating your QUERY)
+        # Filter out null customers and sort by Product A-Z (default sort)
         result_df = result_df[result_df['Customer'].notna() & (result_df['Customer'] != "")]
-        result_df = result_df.sort_values(['Customer', 'Order_Number', 'Category', 'Product'])  # Order_Number internally, displays as Sales Order
+        result_df = result_df.sort_values(['Product', 'Customer', 'Order_Number', 'Category'])  # Product first for A-Z sort
         
         # Reset index
         result_df = result_df.reset_index(drop=True)
@@ -156,6 +180,7 @@ def process_data(so_df, assembly_df, product_df=None):
         st.info(f"Available Assembly columns: {list(assembly_df.columns)}")
         if product_df is not None:
             st.info(f"Available Product columns: {list(product_df.columns)}")
+        st.info("Note: 'Delivery Date' column is optional in Sales Order CSV")
         return None
 
 # Function to generate PDF
@@ -290,26 +315,26 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
         headers.append('SO')
         col_widths.append(1*inch if not portrait_mode else 0.8*inch)
     
-    # Always include these columns
-    headers.extend(['Category', 'Product', 'Batch', 'Package', 'Qty', 'Cases', 'Picked'])
+    # Always include these columns (removed "Picked")
+    headers.extend(['Category', 'Product', 'Batch', 'Package', 'Qty', 'Cases'])
     
-    # Adjust column widths based on hidden columns and orientation
+    # Adjust column widths based on hidden columns and orientation (no Picked column)
     if portrait_mode:
         # Portrait mode - tighter spacing
         if hide_customer and hide_sales_order:
-            col_widths.extend([0.8*inch, 2.5*inch, 0.9*inch, 0.9*inch, 0.5*inch, 0.5*inch, 0.6*inch])
+            col_widths.extend([0.8*inch, 2.8*inch, 1*inch, 1*inch, 0.6*inch, 0.6*inch])
         elif hide_customer or hide_sales_order:
-            col_widths.extend([0.7*inch, 2.1*inch, 0.8*inch, 0.8*inch, 0.5*inch, 0.5*inch, 0.6*inch])
+            col_widths.extend([0.7*inch, 2.4*inch, 0.9*inch, 0.9*inch, 0.6*inch, 0.6*inch])
         else:
-            col_widths.extend([0.6*inch, 1.8*inch, 0.7*inch, 0.7*inch, 0.4*inch, 0.4*inch, 0.5*inch])
+            col_widths.extend([0.6*inch, 2.1*inch, 0.8*inch, 0.8*inch, 0.5*inch, 0.5*inch])
     else:
-        # Landscape mode - existing widths
+        # Landscape mode - existing widths (redistributed without Picked column)
         if hide_customer and hide_sales_order:
-            col_widths.extend([1.1*inch, 3.8*inch, 1.3*inch, 1.3*inch, 0.7*inch, 0.7*inch, 0.9*inch])
+            col_widths.extend([1.2*inch, 4.2*inch, 1.4*inch, 1.4*inch, 0.8*inch, 0.8*inch])
         elif hide_customer or hide_sales_order:
-            col_widths.extend([1*inch, 3.2*inch, 1.2*inch, 1.2*inch, 0.6*inch, 0.6*inch, 0.8*inch])
+            col_widths.extend([1.1*inch, 3.6*inch, 1.3*inch, 1.3*inch, 0.7*inch, 0.7*inch])
         else:
-            col_widths.extend([0.9*inch, 2.5*inch, 1.1*inch, 1.1*inch, 0.6*inch, 0.6*inch, 0.8*inch])
+            col_widths.extend([1*inch, 2.9*inch, 1.2*inch, 1.2*inch, 0.7*inch, 0.7*inch])
     
     # Prepare table data
     table_data = [headers]
@@ -321,18 +346,18 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
         # Determine product column width based on visibility settings and orientation
         if portrait_mode:
             if hide_customer and hide_sales_order:
-                product_width = 2.5
+                product_width = 2.8  # Both hidden
             elif hide_customer or hide_sales_order:
-                product_width = 2.1
+                product_width = 2.4  # One hidden
             else:
-                product_width = 1.8
+                product_width = 2.1  # None hidden
         else:
             if hide_customer and hide_sales_order:
-                product_width = 3.8
+                product_width = 4.2  # Both hidden
             elif hide_customer or hide_sales_order:
-                product_width = 3.2
+                product_width = 3.6  # One hidden
             else:
-                product_width = 2.5
+                product_width = 2.9  # None hidden
         
         # Process text fields with smart wrapping for product names
         product_name = wrap_text_smart(str(row['Product']), product_width, font_size=8)
@@ -341,7 +366,7 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
         package_display = truncate_package_number(row['Input_Package_Number']) if pd.notna(row['Input_Package_Number']) else ""
         
         # Handle Cases with wrapping
-        cases_display = wrap_text(str(row['Cases']), 8) if pd.notna(row['Cases']) and str(row['Cases']) != "" else ""
+        cases_display = wrap_text(str(row['Cases']), 8) if pd.notna(row['Cases']) and row['Cases'] != "" else ""
         
         # Build row data based on visibility options
         row_data = []
@@ -352,21 +377,21 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
         if not hide_sales_order:
             row_data.append(str(row['Order_Number']))
         
-        # Always include these columns
+        # Always include these columns (removed Picked column)
         row_data.extend([
             category_wrapped,
             product_name,  # Now using smart wrapping
             batch_display,
             package_display,
             str(row['Quantity']),
-            cases_display,
-            ""  # Empty Picked column for manual entry
+            cases_display
+            # Removed empty Picked column
         ])
         
         table_data.append(row_data)
     
-    # Create table without header repetition
-    table = Table(table_data, colWidths=col_widths, rowHeights=None)  # Let ReportLab calculate row heights
+    # Create table with header repetition
+    table = Table(table_data, colWidths=col_widths, repeatRows=1)  # Headers repeat on each page
     
     # Custom color scheme
     primary_color = colors.Color(61/255, 192/255, 204/255)      # #3DC0CC - Primary teal
@@ -403,7 +428,7 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
     table.setStyle(TableStyle(table_style))
     elements.append(table)
     
-    # Enhanced footer function with customer/SO info on all pages
+    # Simple footer function (working version)
     def add_page_footer(canvas, doc):
         """Add footer with page numbers, generation info, and customer/SO info on all pages"""
         canvas.saveState()
@@ -441,7 +466,7 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
                 so_text = ", ".join(unique_sales_orders)
             else:
                 so_text = f"{', '.join(unique_sales_orders[:3])} + {len(unique_sales_orders)-3} more"
-            center_info_parts.append(f"SO: {so_text}")
+            center_info_parts.append(so_text)
         
         # Display center info if we have any
         if center_info_parts:
@@ -450,6 +475,107 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
             text_width = canvas.stringWidth(center_text, 'Helvetica', 8)
             x_position = (page_width - text_width) / 2
             canvas.drawString(x_position, 0.3*inch, center_text)
+        
+        canvas.restoreState()
+    
+    # Build PDF with simple footer
+    doc.build(elements, onFirstPage=add_page_footer, onLaterPages=add_page_footer)
+    buffer.seek(0)
+    return buffer
+    
+    # Enhanced footer function with 4-cell table layout
+    def add_page_footer(canvas, doc):
+        """Add footer with 4-cell table containing generation time, customers, SOs, delivery dates, and page number"""
+        canvas.saveState()
+        
+        page_width = page_size[0]
+        page_num = canvas.getPageNumber()
+        
+        # Footer data
+        gen_time = datetime.now().strftime('%m/%d/%Y %I:%M %p')
+        gen_text = f"Generated: {gen_time}"
+        
+        # Customer info
+        customer_text = ""
+        if unique_customers:
+            if len(unique_customers) <= 3:
+                customer_text = ", ".join(unique_customers)
+            else:
+                customer_text = f"{', '.join(unique_customers[:2])} + {len(unique_customers)-2} more"
+        
+        # SO info
+        so_text = ""
+        if unique_sales_orders:
+            if len(unique_sales_orders) <= 5:
+                so_text = ", ".join(unique_sales_orders)
+            else:
+                so_text = f"{', '.join(unique_sales_orders[:3])} + {len(unique_sales_orders)-3} more"
+        
+        # Delivery Date info
+        delivery_text = ""
+        if unique_delivery_dates:
+            if len(unique_delivery_dates) <= 3:
+                delivery_text = ", ".join(unique_delivery_dates)
+            else:
+                delivery_text = f"{', '.join(unique_delivery_dates[:2])} + {len(unique_delivery_dates)-2} more"
+        
+        page_text = f"Page {page_num}"
+        
+        # Create footer table data
+        footer_data = [[gen_text, customer_text, so_text, delivery_text, page_text]]
+        
+        # Calculate column widths for footer table
+        footer_col_widths = [
+            2*inch,           # Generation time
+            2.5*inch,         # Customers  
+            2*inch,           # Sales Orders
+            2*inch,           # Delivery Dates
+            1*inch            # Page number
+        ]
+        
+        # Adjust widths based on orientation
+        if portrait_mode:
+            total_width = page_width - 0.6*inch  # Account for margins
+            footer_col_widths = [
+                total_width * 0.25,  # 25% - Generation time
+                total_width * 0.30,  # 30% - Customers
+                total_width * 0.20,  # 20% - Sales Orders  
+                total_width * 0.15,  # 15% - Delivery Dates
+                total_width * 0.10   # 10% - Page number
+            ]
+        else:
+            total_width = page_width - 0.6*inch
+            footer_col_widths = [
+                total_width * 0.20,  # 20% - Generation time
+                total_width * 0.35,  # 35% - Customers
+                total_width * 0.20,  # 20% - Sales Orders
+                total_width * 0.15,  # 15% - Delivery Dates  
+                total_width * 0.10   # 10% - Page number
+            ]
+        
+        # Create footer table
+        from reportlab.platypus import Table, TableStyle
+        footer_table = Table(footer_data, colWidths=footer_col_widths)
+        
+        # Style the footer table
+        footer_style = TableStyle([
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('TEXTCOLOR', (0, 0), (-1, -1), colors.Color(0.4, 0.4, 0.4)),
+            ('ALIGN', (0, 0), (0, 0), 'LEFT'),    # Generation time - left
+            ('ALIGN', (1, 0), (1, 0), 'CENTER'),  # Customers - center
+            ('ALIGN', (2, 0), (2, 0), 'CENTER'),  # SOs - center  
+            ('ALIGN', (3, 0), (3, 0), 'CENTER'),  # Delivery dates - center
+            ('ALIGN', (4, 0), (4, 0), 'RIGHT'),   # Page number - right
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ])
+        
+        footer_table.setStyle(footer_style)
+        
+        # Position and draw the footer table
+        footer_table.wrapOn(canvas, page_width - 0.6*inch, 0.4*inch)
+        footer_table.drawOn(canvas, 0.3*inch, 0.2*inch)
         
         canvas.restoreState()
     
@@ -574,13 +700,13 @@ if st.session_state.processed_data is not None:
         col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
         
         with col1:
-            hide_customer = st.checkbox("Hide Customer Column", help="Remove Customer column from PDF report")
+            show_customer = st.checkbox("Show Customer Column", value=False, help="Include Customer column in PDF report")
         
         with col2:
-            hide_sales_order = st.checkbox("Hide SO Column", help="Remove Sales Order column from PDF report")
+            show_sales_order = st.checkbox("Show SO Column", value=False, help="Include Sales Order column in PDF report")
         
         with col3:
-            portrait_mode = st.checkbox("Portrait Mode", help="Generate PDF in portrait orientation instead of landscape")
+            landscape_mode = st.checkbox("Landscape Mode", value=False, help="Generate PDF in landscape orientation instead of portrait")
         
         with col4:
             generate_pdf_btn = st.button("📑 Generate PDF", type="primary")
@@ -624,6 +750,21 @@ if st.session_state.processed_data is not None:
             # PDF download (triggered by the button above)
             if generate_pdf_btn:
                 with st.spinner("Generating PDF report..."):
+                    # Debug: Show what's being passed to PDF function
+                    st.write("**Debug Info:**")
+                    st.write(f"Columns in filtered_df: {list(filtered_df.columns)}")
+                    if 'Delivery_Date' in filtered_df.columns:
+                        st.write(f"Sample delivery dates: {filtered_df['Delivery_Date'].head().tolist()}")
+                        unique_dates = filtered_df['Delivery_Date'].dropna().unique()
+                        st.write(f"Unique delivery dates in data: {list(unique_dates)}")
+                    else:
+                        st.write("❌ Delivery_Date column not found in filtered data")
+                    
+                    # Invert the logic - pass hide flags to the PDF function
+                    hide_customer = not show_customer
+                    hide_sales_order = not show_sales_order
+                    portrait_mode = not landscape_mode
+                    
                     pdf_buffer = generate_pdf(filtered_df, applied_filters, hide_customer, hide_sales_order, portrait_mode)
                     
                 # Immediately trigger download
@@ -725,9 +866,11 @@ else:
             - 🔗 Links Package Labels to Assembly Numbers
             - 🔍 Finds Input Package Numbers for tracking
             - 📦 Calculates cases needed (Quantity ÷ Units Per Case)
-            - 📑 Generates formatted PDF reports with pick checkboxes
+            - 📑 Generates formatted PDF reports (Portrait by default)
             - 🎯 Filter by customer, order, or category
             - 📊 Data overview and analytics
+            - 📋 Clean product-focused layout (Customer/SO columns optional)
+            - 🗓️ Organized footer with generation time, customers, sales orders, and delivery dates
             """)
         
         with st.expander("📁 CSV File Requirements"):
@@ -757,6 +900,7 @@ else:
             st.info("📦 Product List detected - cases will be calculated in the report")
         else:
             st.info("💡 Tip: Upload a Product List CSV to include calculated cases in your pick list")
+        st.info("📋 Default: Portrait mode with product-focused layout (Customer/SO columns optional)")
     
     else:
         missing_files = []
