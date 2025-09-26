@@ -155,7 +155,7 @@ def process_data(so_df, assembly_df, product_df=None):
         # Remove the Lookup_Value and Product_ID columns as they're not needed in the final output
         result_df = result_df.drop(['Lookup_Value', 'Product_ID'], axis=1)
         
-        # Reorder columns - put Delivery_Date in the final dataframe but not displayed in PDF table
+        # Reorder columns
         base_columns = ['Customer', 'Order_Number', 'Category', 'Product', 'Batch_Number', 'Input_Package_Number', 'Quantity', 'Cases']
         if 'Delivery_Date' in result_df.columns:
             columns_order = base_columns + ['Delivery_Date']
@@ -183,6 +183,121 @@ def process_data(so_df, assembly_df, product_df=None):
         st.info("Note: 'Delivery Date' column is optional in Sales Order CSV")
         return None
 
+# Helper functions for PDF generation
+def wrap_text_smart(text, column_width_inches, font_size=8):
+    """Smart text wrapping based on actual column width"""
+    if not text or pd.isna(text):
+        return ""
+    
+    text = str(text).strip()
+    if not text:
+        return ""
+    
+    # More accurate character estimation for Helvetica font
+    # Average character width in Helvetica is roughly 0.5-0.6 * font_size
+    points_width = column_width_inches * 72 - 12  # Subtract padding (6 points each side)
+    avg_char_width = 0.55 * font_size  # More conservative estimate
+    max_chars_per_line = int(points_width / avg_char_width)
+    
+    # Don't wrap if text fits comfortably
+    if len(text) <= max_chars_per_line:
+        return text
+    
+    # Find the best break point after a hyphen
+    best_break = None
+    
+    # Look for hyphens within reasonable range, break AFTER the hyphen
+    for i in range(max_chars_per_line, max(max_chars_per_line//3, 5), -1):
+        if i < len(text) and text[i-1] == '-':
+            best_break = i  # This puts hyphen at end of first line
+            break
+    
+    # If no hyphen found, look for spaces
+    if not best_break:
+        for i in range(max_chars_per_line, max(max_chars_per_line//3, 5), -1):
+            if i < len(text) and text[i-1] == ' ':
+                best_break = i - 1  # Break before the space
+                break
+    
+    # If still no good break point, don't wrap (let it overflow slightly rather than bad break)
+    if not best_break or best_break < max_chars_per_line//3:
+        return text
+    
+    return text[:best_break] + '\n' + text[best_break:].strip()
+
+def wrap_text(text, max_length=20, break_chars=None):
+    """Simple text wrapping function for columns with known limits"""
+    if not text or len(str(text)) <= max_length:
+        return str(text)
+    
+    text = str(text)
+    
+    # Find break points, prioritizing hyphens
+    for i in range(max_length, max(max_length//2, 1), -1):
+        if i < len(text):
+            if text[i-1] == '-':
+                return text[:i] + '\n' + text[i:].strip()
+            elif text[i-1] == ' ':
+                return text[:i-1] + '\n' + text[i:].strip()
+    
+    # No good break point found, break at max_length
+    return text[:max_length] + '\n' + text[max_length:]
+
+def truncate_package_number(package_text):
+    """Get last 14 characters of package number"""
+    if not package_text or len(str(package_text)) <= 14:
+        return str(package_text)
+    return str(package_text)[-14:]
+
+def add_page_footer(canvas, doc, page_size, unique_customers, unique_sales_orders):
+    """Add footer with page numbers, generation info, and customer/SO info on all pages"""
+    canvas.saveState()
+    
+    page_width = page_size[0]
+    page_num = canvas.getPageNumber()
+    
+    # Page number and generation time
+    page_text = f"Page {page_num}"
+    gen_time = datetime.now().strftime('%m/%d/%Y %I:%M %p')
+    gen_text = f"Generated: {gen_time}"
+    
+    canvas.setFont('Helvetica', 8)
+    canvas.setFillColor(colors.Color(0.4, 0.4, 0.4))
+    
+    # Left side - generation time
+    canvas.drawString(0.3*inch, 0.3*inch, gen_text)
+    # Right side - page number  
+    canvas.drawRightString(page_width - 0.3*inch, 0.3*inch, page_text)
+    
+    # Center - Customer and SO info (on all pages, no labels)
+    center_info_parts = []
+    
+    # Add customer info (always show if customers exist)
+    if unique_customers:
+        if len(unique_customers) <= 3:
+            customer_text = ", ".join(unique_customers)
+        else:
+            customer_text = f"{', '.join(unique_customers[:2])} + {len(unique_customers)-2} more"
+        center_info_parts.append(customer_text)
+    
+    # Add SO info (always show if sales orders exist)
+    if unique_sales_orders:
+        if len(unique_sales_orders) <= 5:
+            so_text = ", ".join(unique_sales_orders)
+        else:
+            so_text = f"{', '.join(unique_sales_orders[:3])} + {len(unique_sales_orders)-3} more"
+        center_info_parts.append(so_text)
+    
+    # Display center info if we have any
+    if center_info_parts:
+        center_text = " | ".join(center_info_parts)
+        # Calculate center position
+        text_width = canvas.stringWidth(center_text, 'Helvetica', 8)
+        x_position = (page_width - text_width) / 2
+        canvas.drawString(x_position, 0.3*inch, center_text)
+    
+    canvas.restoreState()
+
 # Function to generate PDF
 def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_order=False, portrait_mode=False):
     """
@@ -209,7 +324,7 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
         'FilterStyle',
         parent=styles['Normal'],
         fontSize=9,
-        textColor=colors.Color(0.4, 0.4, 0.4),  # Same as other text
+        textColor=colors.Color(0.4, 0.4, 0.4),
         alignment=1,  # Center alignment
         spaceAfter=10
     )
@@ -232,76 +347,9 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
             filter_para = Paragraph(filter_text, filter_style)
             elements.append(filter_para)
     
-    # Extract unique customers and sales orders for footer (regardless of column visibility)
+    # Extract unique customers and sales orders for footer
     unique_customers = sorted(df['Customer'].unique())
     unique_sales_orders = sorted(df['Order_Number'].unique())
-    
-    # Function to wrap text for display with smart width detection
-    def wrap_text_smart(text, column_width_inches, font_size=8):
-        """Smart text wrapping based on actual column width"""
-        if not text or pd.isna(text):
-            return ""
-        
-        text = str(text).strip()
-        if not text:
-            return ""
-        
-        # More accurate character estimation for Helvetica font
-        # Average character width in Helvetica is roughly 0.5-0.6 * font_size
-        points_width = column_width_inches * 72 - 12  # Subtract padding (6 points each side)
-        avg_char_width = 0.55 * font_size  # More conservative estimate
-        max_chars_per_line = int(points_width / avg_char_width)
-        
-        # Don't wrap if text fits comfortably
-        if len(text) <= max_chars_per_line:
-            return text
-        
-        # Find the best break point after a hyphen
-        best_break = None
-        
-        # Look for hyphens within reasonable range, break AFTER the hyphen
-        for i in range(max_chars_per_line, max(max_chars_per_line//3, 5), -1):
-            if i < len(text) and text[i-1] == '-':
-                best_break = i  # This puts hyphen at end of first line
-                break
-        
-        # If no hyphen found, look for spaces
-        if not best_break:
-            for i in range(max_chars_per_line, max(max_chars_per_line//3, 5), -1):
-                if i < len(text) and text[i-1] == ' ':
-                    best_break = i - 1  # Break before the space
-                    break
-        
-        # If still no good break point, don't wrap (let it overflow slightly rather than bad break)
-        if not best_break or best_break < max_chars_per_line//3:
-            return text
-        
-        return text[:best_break] + '\n' + text[best_break:].strip()
-    
-    # Function to wrap text for display (for fixed-width columns)
-    def wrap_text(text, max_length=20, break_chars=None):
-        """Simple text wrapping function for columns with known limits"""
-        if not text or len(str(text)) <= max_length:
-            return str(text)
-        
-        text = str(text)
-        
-        # Find break points, prioritizing hyphens
-        for i in range(max_length, max(max_length//2, 1), -1):
-            if i < len(text):
-                if text[i-1] == '-':
-                    return text[:i] + '\n' + text[i:].strip()
-                elif text[i-1] == ' ':
-                    return text[:i-1] + '\n' + text[i:].strip()
-        
-        # No good break point found, break at max_length
-        return text[:max_length] + '\n' + text[max_length:]
-    
-    # Function to get last 14 characters of package number
-    def truncate_package_number(package_text):
-        if not package_text or len(str(package_text)) <= 14:
-            return str(package_text)
-        return str(package_text)[-14:]
     
     # Build headers and column widths based on visibility options and orientation
     headers = []
@@ -315,10 +363,10 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
         headers.append('SO')
         col_widths.append(1*inch if not portrait_mode else 0.8*inch)
     
-    # Always include these columns (removed "Picked")
+    # Always include these columns
     headers.extend(['Category', 'Product', 'Batch', 'Package', 'Qty', 'Cases'])
     
-    # Adjust column widths based on hidden columns and orientation (no Picked column)
+    # Adjust column widths based on hidden columns and orientation
     if portrait_mode:
         # Portrait mode - tighter spacing
         if hide_customer and hide_sales_order:
@@ -328,7 +376,7 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
         else:
             col_widths.extend([0.6*inch, 2.1*inch, 0.8*inch, 0.8*inch, 0.5*inch, 0.5*inch])
     else:
-        # Landscape mode - existing widths (redistributed without Picked column)
+        # Landscape mode
         if hide_customer and hide_sales_order:
             col_widths.extend([1.2*inch, 4.2*inch, 1.4*inch, 1.4*inch, 0.8*inch, 0.8*inch])
         elif hide_customer or hide_sales_order:
@@ -361,8 +409,8 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
         
         # Process text fields with smart wrapping for product names
         product_name = wrap_text_smart(str(row['Product']), product_width, font_size=8)
-        category_wrapped = wrap_text(str(row['Category']), 12)  # Category still uses simple wrap
-        batch_display = wrap_text(batch_number, 15) if batch_number else ""  # Remove third parameter
+        category_wrapped = wrap_text(str(row['Category']), 12)
+        batch_display = wrap_text(batch_number, 15) if batch_number else ""
         package_display = truncate_package_number(row['Input_Package_Number']) if pd.notna(row['Input_Package_Number']) else ""
         
         # Handle Cases with wrapping
@@ -377,21 +425,20 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
         if not hide_sales_order:
             row_data.append(str(row['Order_Number']))
         
-        # Always include these columns (removed Picked column)
+        # Always include these columns
         row_data.extend([
             category_wrapped,
-            product_name,  # Now using smart wrapping
+            product_name,
             batch_display,
             package_display,
             str(row['Quantity']),
             cases_display
-            # Removed empty Picked column
         ])
         
         table_data.append(row_data)
     
     # Create table with header repetition
-    table = Table(table_data, colWidths=col_widths, repeatRows=1)  # Headers repeat on each page
+    table = Table(table_data, colWidths=col_widths, repeatRows=1)
     
     # Custom color scheme
     primary_color = colors.Color(61/255, 192/255, 204/255)      # #3DC0CC - Primary teal
@@ -416,10 +463,10 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
         ('FONTSIZE', (0, 1), (-1, -1), 8),
         ('GRID', (0, 0), (-1, -1), 0.5, border_color),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, alt_row_color]),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),    # Increased padding
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),   # Increased padding  
-        ('TOPPADDING', (0, 1), (-1, -1), 12),    # Increased top padding for data rows
-        ('BOTTOMPADDING', (0, 1), (-1, -1), 12), # Increased bottom padding for data rows
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+        ('TOPPADDING', (0, 1), (-1, -1), 12),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 12),
         
         # Ensure minimum row height for proper centering
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, alt_row_color]),
@@ -428,159 +475,12 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
     table.setStyle(TableStyle(table_style))
     elements.append(table)
     
-    # Simple footer function (working version)
-    def add_page_footer(canvas, doc):
-        """Add footer with page numbers, generation info, and customer/SO info on all pages"""
-        canvas.saveState()
-        
-        page_width = page_size[0]  # Use the appropriate page width based on orientation
-        page_num = canvas.getPageNumber()
-        
-        # Page number and generation time
-        page_text = f"Page {page_num}"
-        gen_time = datetime.now().strftime('%m/%d/%Y %I:%M %p')
-        gen_text = f"Generated: {gen_time}"
-        
-        canvas.setFont('Helvetica', 8)
-        canvas.setFillColor(colors.Color(0.4, 0.4, 0.4))
-        
-        # Left side - generation time
-        canvas.drawString(0.3*inch, 0.3*inch, gen_text)
-        # Right side - page number  
-        canvas.drawRightString(page_width - 0.3*inch, 0.3*inch, page_text)
-        
-        # Center - Customer and SO info (on all pages, no labels)
-        center_info_parts = []
-        
-        # Add customer info (always show if customers exist)
-        if unique_customers:
-            if len(unique_customers) <= 3:
-                customer_text = ", ".join(unique_customers)
-            else:
-                customer_text = f"{', '.join(unique_customers[:2])} + {len(unique_customers)-2} more"
-            center_info_parts.append(customer_text)
-        
-        # Add SO info (always show if sales orders exist)
-        if unique_sales_orders:
-            if len(unique_sales_orders) <= 5:
-                so_text = ", ".join(unique_sales_orders)
-            else:
-                so_text = f"{', '.join(unique_sales_orders[:3])} + {len(unique_sales_orders)-3} more"
-            center_info_parts.append(so_text)
-        
-        # Display center info if we have any
-        if center_info_parts:
-            center_text = " | ".join(center_info_parts)
-            # Calculate center position
-            text_width = canvas.stringWidth(center_text, 'Helvetica', 8)
-            x_position = (page_width - text_width) / 2
-            canvas.drawString(x_position, 0.3*inch, center_text)
-        
-        canvas.restoreState()
+    # Create footer callback with closure to pass variables
+    def footer_callback(canvas, doc):
+        return add_page_footer(canvas, doc, page_size, unique_customers, unique_sales_orders)
     
-    # Build PDF with simple footer
-    doc.build(elements, onFirstPage=add_page_footer, onLaterPages=add_page_footer)
-    buffer.seek(0)
-    return buffer
-    
-    # Enhanced footer function with 4-cell table layout
-    def add_page_footer(canvas, doc):
-        """Add footer with 4-cell table containing generation time, customers, SOs, delivery dates, and page number"""
-        canvas.saveState()
-        
-        page_width = page_size[0]
-        page_num = canvas.getPageNumber()
-        
-        # Footer data
-        gen_time = datetime.now().strftime('%m/%d/%Y %I:%M %p')
-        gen_text = f"Generated: {gen_time}"
-        
-        # Customer info
-        customer_text = ""
-        if unique_customers:
-            if len(unique_customers) <= 3:
-                customer_text = ", ".join(unique_customers)
-            else:
-                customer_text = f"{', '.join(unique_customers[:2])} + {len(unique_customers)-2} more"
-        
-        # SO info
-        so_text = ""
-        if unique_sales_orders:
-            if len(unique_sales_orders) <= 5:
-                so_text = ", ".join(unique_sales_orders)
-            else:
-                so_text = f"{', '.join(unique_sales_orders[:3])} + {len(unique_sales_orders)-3} more"
-        
-        # Delivery Date info
-        delivery_text = ""
-        if unique_delivery_dates:
-            if len(unique_delivery_dates) <= 3:
-                delivery_text = ", ".join(unique_delivery_dates)
-            else:
-                delivery_text = f"{', '.join(unique_delivery_dates[:2])} + {len(unique_delivery_dates)-2} more"
-        
-        page_text = f"Page {page_num}"
-        
-        # Create footer table data
-        footer_data = [[gen_text, customer_text, so_text, delivery_text, page_text]]
-        
-        # Calculate column widths for footer table
-        footer_col_widths = [
-            2*inch,           # Generation time
-            2.5*inch,         # Customers  
-            2*inch,           # Sales Orders
-            2*inch,           # Delivery Dates
-            1*inch            # Page number
-        ]
-        
-        # Adjust widths based on orientation
-        if portrait_mode:
-            total_width = page_width - 0.6*inch  # Account for margins
-            footer_col_widths = [
-                total_width * 0.25,  # 25% - Generation time
-                total_width * 0.30,  # 30% - Customers
-                total_width * 0.20,  # 20% - Sales Orders  
-                total_width * 0.15,  # 15% - Delivery Dates
-                total_width * 0.10   # 10% - Page number
-            ]
-        else:
-            total_width = page_width - 0.6*inch
-            footer_col_widths = [
-                total_width * 0.20,  # 20% - Generation time
-                total_width * 0.35,  # 35% - Customers
-                total_width * 0.20,  # 20% - Sales Orders
-                total_width * 0.15,  # 15% - Delivery Dates  
-                total_width * 0.10   # 10% - Page number
-            ]
-        
-        # Create footer table
-        from reportlab.platypus import Table, TableStyle
-        footer_table = Table(footer_data, colWidths=footer_col_widths)
-        
-        # Style the footer table
-        footer_style = TableStyle([
-            ('FONTSIZE', (0, 0), (-1, -1), 8),
-            ('TEXTCOLOR', (0, 0), (-1, -1), colors.Color(0.4, 0.4, 0.4)),
-            ('ALIGN', (0, 0), (0, 0), 'LEFT'),    # Generation time - left
-            ('ALIGN', (1, 0), (1, 0), 'CENTER'),  # Customers - center
-            ('ALIGN', (2, 0), (2, 0), 'CENTER'),  # SOs - center  
-            ('ALIGN', (3, 0), (3, 0), 'CENTER'),  # Delivery dates - center
-            ('ALIGN', (4, 0), (4, 0), 'RIGHT'),   # Page number - right
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ])
-        
-        footer_table.setStyle(footer_style)
-        
-        # Position and draw the footer table
-        footer_table.wrapOn(canvas, page_width - 0.6*inch, 0.4*inch)
-        footer_table.drawOn(canvas, 0.3*inch, 0.2*inch)
-        
-        canvas.restoreState()
-    
-    # Build PDF with enhanced footer
-    doc.build(elements, onFirstPage=add_page_footer, onLaterPages=add_page_footer)
+    # Build PDF with footer
+    doc.build(elements, onFirstPage=footer_callback, onLaterPages=footer_callback)
     buffer.seek(0)
     return buffer
 
@@ -750,16 +650,6 @@ if st.session_state.processed_data is not None:
             # PDF download (triggered by the button above)
             if generate_pdf_btn:
                 with st.spinner("Generating PDF report..."):
-                    # Debug: Show what's being passed to PDF function
-                    st.write("**Debug Info:**")
-                    st.write(f"Columns in filtered_df: {list(filtered_df.columns)}")
-                    if 'Delivery_Date' in filtered_df.columns:
-                        st.write(f"Sample delivery dates: {filtered_df['Delivery_Date'].head().tolist()}")
-                        unique_dates = filtered_df['Delivery_Date'].dropna().unique()
-                        st.write(f"Unique delivery dates in data: {list(unique_dates)}")
-                    else:
-                        st.write("❌ Delivery_Date column not found in filtered data")
-                    
                     # Invert the logic - pass hide flags to the PDF function
                     hide_customer = not show_customer
                     hide_sales_order = not show_sales_order
@@ -870,7 +760,7 @@ else:
             - 🎯 Filter by customer, order, or category
             - 📊 Data overview and analytics
             - 📋 Clean product-focused layout (Customer/SO columns optional)
-            - 🗓️ Organized footer with generation time, customers, sales orders, and delivery dates
+            - 🗓️ Organized footer with generation time, customers, and sales orders
             """)
         
         with st.expander("📁 CSV File Requirements"):
