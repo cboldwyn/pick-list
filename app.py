@@ -9,6 +9,8 @@ from reportlab.lib.units import inch
 import io
 from io import StringIO
 from datetime import datetime
+import zipfile
+import re
 
 # Set page config
 st.set_page_config(
@@ -17,18 +19,30 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📦 Sales Order Pick List Generator v1.2.1")
+st.title("📦 Sales Order Pick List Generator v1.3")
 st.markdown("**Haven Cannabis** | Generate custom pick lists with input package tracking")
 
 # Initialize session state
 if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
+# Re-stamped every time data is processed, so anything cached from an earlier upload
+# can tell that the data underneath it has been replaced
+if 'data_token' not in st.session_state:
+    st.session_state.data_token = None
 if 'so_data' not in st.session_state:
     st.session_state.so_data = None
 if 'assembly_data' not in st.session_state:
     st.session_state.assembly_data = None
 if 'product_data' not in st.session_state:
     st.session_state.product_data = None
+# Separate-PDF ZIP is kept in session state so the download button survives the
+# rerun that clicking it causes (otherwise the button disappears after one click)
+if 'separate_pdfs_zip' not in st.session_state:
+    st.session_state.separate_pdfs_zip = None
+if 'separate_pdfs_zip_name' not in st.session_state:
+    st.session_state.separate_pdfs_zip_name = None
+if 'separate_pdfs_signature' not in st.session_state:
+    st.session_state.separate_pdfs_signature = None
 
 # Function to clean and load CSV data
 def load_csv_with_metadata_skip(uploaded_file):
@@ -635,6 +649,102 @@ def generate_pdf(df, selected_filters=None, hide_customer=False, hide_sales_orde
     buffer.seek(0)
     return buffer
 
+# Icon for the Generate Separate PDFs button, embedded as a base64 data URI so the
+# app stays a single file with no image asset to deploy. Streamlit scales an image
+# in a button label down to the height of the button text (about 16 pixels), so it
+# is stored here at 48px to stay sharp on high-resolution screens.
+# Artwork from Flaticon - credited in the "How it Works" panel on the welcome screen.
+SEPARATE_PDFS_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAMAAABg3Am1AAAAwFBMVEUAAAD19/n+4HwCAgD92nAYFQ3/6IJmaW4WFgmtjUTS2+nh5e4uMTVeYWU9PkEtIw/7zmMAAAD+94uYfDtpWS2umVX///9HSk8qIg4BAABGOhqah0t0YzINCQQAAABVRyXJqVeegT4BAQCZnaMXFQokHAm6pFvWvGllYVIHBgX/+XomKC92WCVvc3kpHg3cwWyNfUVHPiM9Qkt7fYOqqqrMzMzMmWZdY2lURB6AaDKutsB+gYc/Pz+ggz52fYQAAABCjll/AAAAQHRSTlMA/v75/v7+/iH+/v////8V/tT+/v7/Av7/jP7//jOp//7/cf4e/////07+/wj/GP//////AwUFUv/8/P8E/UkAZxVDUgAAAf5JREFUeNrNlmt3ojAQQEkmQEFtBbMEKK8taKmvdtvu+/H/f9ZOUkD07CZ87D1+UJzLTDJx0LLeLfvmaswx0ofnBVwQJI0mPoE48z6ckdnwMHz/+noefwff2TZ0zghZCQ/R50hxWQ9klD3FFzXZNtbV8fVPENydhGLN8HbP7jmL09uD7x8EFL+6+C8BpyuoiQbfJ6SGPscNrGh8jRf1EBEMwkcKLZkRLTPiBtFJiJ9rMdcifohiVFKJuyKuNQjcs74xUsj0i5b8hL6VqqQ5mRkgu5RDMyzaJUYWNrOTXlgL/2Wh5cUXccjVRsk1fFNnQQcGlOEt3AyLdk19cKEdCenOvIZdOgjTFu3CSFi3ZqFdj0uam4V5OhK4bRZsPhJWMDPFz1SYFI7gbSvwTYIP1daDo8qQZiWIg1uT2v0/AsosVRkK2eQYm9mGqa7XMgQKOZN+M0SOFupooIxS6kFiAafLJXPwE1PX/k0nhRwsWDEUqA680+M98shwY7sMesG5fxtumzADK0iNGVDZbCp8MedTYCU494wCdcIyjrnD4gQncYWCMQV94vzWWeL4y6VgToE5cL5XkMujNElQzZKnLwrM29Q7YSanQJHKNUwxcJPkuExsLGkpHTNqMOV40CdFM/w95G+PRO5NgkPSPRQDmMTpObdv8isjebN/p39K/gIDJjm2Rka6lwAAAABJRU5ErkJggg=="
+
+# Helper functions for generating one PDF per Sales Order (v1.3)
+def sanitize_filename(name):
+    """
+    Make a string safe to use as a file name inside a ZIP on Windows.
+    Customer names end up in these names, so replace the characters Windows
+    forbids ( \\ / : * ? " < > | ) with a space, collapse the extra spaces, and
+    trim trailing periods/spaces - Explorer can't open entries that end in those.
+    """
+    cleaned = re.sub(r'[\\/:*?"<>|]', ' ', str(name))
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    cleaned = cleaned.rstrip('. ')
+
+    # Fall back to something valid if the name was nothing but bad characters
+    return cleaned if cleaned else "Pick List"
+
+def make_unique_filename(filename, used_filenames):
+    """
+    Guarantee a unique entry name inside the ZIP. Duplicate names in a ZIP are
+    silently lossy, so collisions get " (2)", " (3)", etc. added before the .pdf.
+    Adds the returned name to used_filenames.
+    """
+    if filename not in used_filenames:
+        used_filenames.add(filename)
+        return filename
+
+    # Split the extension off so the counter goes before it: "name (2).pdf"
+    if filename.lower().endswith('.pdf'):
+        base = filename[:-4]
+        extension = '.pdf'
+    else:
+        base = filename
+        extension = ''
+
+    counter = 2
+    while f"{base} ({counter}){extension}" in used_filenames:
+        counter += 1
+
+    unique_filename = f"{base} ({counter}){extension}"
+    used_filenames.add(unique_filename)
+    return unique_filename
+
+def generate_separate_pdfs_zip(df, selected_filters=None, hide_customer=False, hide_sales_order=False,
+                               portrait_mode=False, progress_bar=None):
+    """
+    Build one PDF per Sales Order in df and return them all as a single in-memory ZIP.
+    Each PDF comes from the existing generate_pdf() called on that Sales Order's rows,
+    so every file is identical to what the app produces for that SO on its own.
+    """
+    sales_orders = sorted(df['Order_Number'].unique())
+    used_filenames = set()
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for index, sales_order in enumerate(sales_orders):
+            # One Sales Order's rows out of the already-filtered data
+            so_df = df[df['Order_Number'] == sales_order]
+            so_customers = sorted(so_df['Customer'].unique())
+
+            # The line printed across the top of the PDF comes from selected_filters.
+            # Handing over the whole filter would print every selected store on every
+            # sheet ("Haven Belmont | Haven DTLB | Haven Paramount"), which the pickers
+            # read before they get to the store name in the footer. Narrow it to the
+            # store and order this particular sheet covers.
+            so_filters = None
+            if selected_filters:
+                so_filters = dict(selected_filters)  # copy - leave the caller's filters alone
+                if 'Customers' in so_filters:
+                    so_filters['Customers'] = so_customers
+                if 'Sales Orders' in so_filters:
+                    so_filters['Sales Orders'] = [str(sales_order)]
+
+            pdf_buffer = generate_pdf(so_df, so_filters, hide_customer, hide_sales_order, portrait_mode)
+
+            # generate_document_title() returns "Pick List {Customer} {SO}" when handed
+            # a single customer and a single order - exactly the name the pickers want
+            document_title = generate_document_title(so_customers, [sales_order])
+            filename = make_unique_filename(sanitize_filename(document_title) + ".pdf", used_filenames)
+
+            zip_file.writestr(filename, pdf_buffer.getvalue())
+
+            if progress_bar is not None:
+                progress_bar.progress(
+                    (index + 1) / len(sales_orders),
+                    text=f"Generating PDF {index + 1} of {len(sales_orders)}..."
+                )
+
+    zip_buffer.seek(0)
+    return zip_buffer
+
 # Sidebar for file uploads
 st.sidebar.header("📊 Data Sources")
 
@@ -699,6 +809,8 @@ if st.sidebar.button("🚀 Process Data", type="primary", disabled=not (so_file 
             
             if processed_df is not None:
                 st.session_state.processed_data = processed_df
+                # New data makes anything generated from the old data stale
+                st.session_state.data_token = datetime.now().isoformat()
                 st.success(f"✅ Successfully processed {len(processed_df):,} records")
             else:
                 st.error("❌ Failed to process data. Please check your CSV file structure.")
@@ -741,8 +853,8 @@ if st.session_state.processed_data is not None:
             categories = sorted(filtered_categories.tolist())
             selected_categories = st.multiselect("Select Categories", categories)
         
-        # PDF Options and Generate Button
-        col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
+        # PDF Options and Generate Buttons
+        col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 2])
         
         with col1:
             show_customer = st.checkbox("Show Customer Column", value=False, help="Include Customer column in PDF report")
@@ -756,6 +868,11 @@ if st.session_state.processed_data is not None:
         with col4:
             generate_pdf_btn = st.button("📑 Generate PDF", type="primary")
         
+        with col5:
+            # One PDF per Sales Order, delivered as a single ZIP
+            generate_separate_pdfs_btn = st.button(f"![]({SEPARATE_PDFS_ICON}) Generate Separate PDFs",
+                                                   help="Create one PDF per Sales Order and download them all as a ZIP")
+
         # Apply filters
         filtered_df = processed_df.copy()
         
@@ -827,6 +944,68 @@ if st.session_state.processed_data is not None:
             else:
                 # Show placeholder when PDF not generated
                 st.button("📑 Download PDF Report", disabled=True, help="Click 'Generate PDF' button above first", use_container_width=True)
+
+        # Separate PDFs section - one PDF per Sales Order, zipped together
+        # The data, filters and options are all recorded alongside the ZIP. If any of
+        # them change, the stored ZIP is dropped so we never quietly hand out stale
+        # pick lists. The data token covers the case where the same filters are
+        # re-applied after a fresh upload, which would otherwise look unchanged.
+        separate_pdfs_signature = f"{st.session_state.data_token}|{applied_filters}|{show_customer}|{show_sales_order}|{landscape_mode}"
+
+        if st.session_state.separate_pdfs_signature != separate_pdfs_signature:
+            st.session_state.separate_pdfs_zip = None
+            st.session_state.separate_pdfs_zip_name = None
+
+        if generate_separate_pdfs_btn:
+            if len(filtered_df) == 0:
+                st.warning("⚠️ No records match the current filters - nothing to generate.")
+            else:
+                sales_orders = sorted(filtered_df['Order_Number'].unique())
+
+                # Tell the user how much work this is before starting - with no filters
+                # applied this can easily be 100+ orders
+                st.info(f"📦 This will create {len(sales_orders)} PDF(s) - one per Sales Order.")
+
+                # Only bother with a progress bar for big batches; small ones finish immediately
+                progress_bar = st.progress(0.0, text="Generating PDFs...") if len(sales_orders) > 20 else None
+
+                with st.spinner(f"Generating {len(sales_orders)} PDF(s)..."):
+                    # Same inverted logic the single-PDF button uses above
+                    hide_customer = not show_customer
+                    hide_sales_order = not show_sales_order
+                    portrait_mode = not landscape_mode
+
+                    zip_buffer = generate_separate_pdfs_zip(filtered_df, applied_filters, hide_customer,
+                                                            hide_sales_order, portrait_mode, progress_bar)
+
+                if progress_bar is not None:
+                    progress_bar.empty()
+
+                # Include the store name in the ZIP name when it's a single customer
+                unique_customers = sorted(filtered_df['Customer'].unique())
+                today = datetime.now().strftime('%Y-%m-%d')
+                if len(unique_customers) == 1:
+                    zip_filename = f"Pick Lists {sanitize_filename(unique_customers[0])} {today}.zip"
+                else:
+                    zip_filename = f"Pick Lists {today}.zip"
+
+                # Store the result so the download button below survives the rerun
+                st.session_state.separate_pdfs_zip = zip_buffer.getvalue()
+                st.session_state.separate_pdfs_zip_name = zip_filename
+                st.session_state.separate_pdfs_signature = separate_pdfs_signature
+
+        # Rendered from session state, so it stays on screen after a download and
+        # can be clicked again without regenerating everything
+        if st.session_state.separate_pdfs_zip is not None:
+            st.download_button(
+                label=f"![]({SEPARATE_PDFS_ICON}) Download {st.session_state.separate_pdfs_zip_name}",
+                data=st.session_state.separate_pdfs_zip,
+                file_name=st.session_state.separate_pdfs_zip_name,
+                mime="application/zip",
+                use_container_width=True,
+                key="separate_pdfs_download"
+            )
+            st.success("✅ Separate PDFs generated successfully!")
     
     with tab2:
         st.header("📊 Data Overview")
@@ -909,25 +1088,32 @@ else:
             st.markdown("""
             **📋 Upload** → **🔄 Process** → **🎯 Filter** → **📥 Download**
             
-            **Haven Cannabis Pick List Generator v1.2.1** processes your sales order, assembly, and product data to create custom pick lists with input package tracking and calculated case requirements.
+            **Haven Cannabis Pick List Generator v1.3** processes your sales order, assembly, and product data to create custom pick lists with input package tracking and calculated case requirements.
             
             **Key Features:**
             - 🔗 Links Package Labels to Assembly Numbers
             - 🔍 Finds Input Package Numbers for tracking
             - 📦 Calculates cases needed (Quantity ÷ Units Per Case)
             - 📑 Generates formatted PDF reports (Portrait by default)
+            - 🗂️ **Generate Separate PDFs** - one PDF per Sales Order, downloaded together as a single ZIP
             - 🎯 Filter by customer, order, or category
             - 📊 Data overview and analytics
             - 📋 Clean product-focused layout (Customer/SO columns optional)
             - 🗓️ Organized footer with generation time, customers, sales orders, and delivery dates
             - ✅ Auto-filters to Processing orders only
             
+            **v1.3 Improvements:**
+            - 🗂️ New "Generate Separate PDFs" button - splits the current filter into one PDF per Sales Order and delivers them in one ZIP, instead of generating and downloading each order by hand
+
             **v1.2.1 Improvements:**
             - ✨ Combined Qty/Cases into single column with Units prominent
             - 🔢 Smart decimal formatting (no unnecessary ".0")
             - ⚠️ Partial case highlighting with amber background
             - 📝 Proper singular/plural (1 Unit vs 2 Units, 1 Case vs 2 Cases)
             - 📐 Tighter, centered layout for Qty/Cases display
+
+            ---
+            *Folder icon on the "Generate Separate PDFs" button by [Flaticon](https://www.flaticon.com/).*
             """)
         
         with st.expander("📁 CSV File Requirements"):
